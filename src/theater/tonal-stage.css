@@ -131,13 +131,18 @@ body { background: var(--base); color: var(--ink); font-family: var(--font-ui); 
   background: var(--surface);
 }
 .theater-brand { gap: 11px; min-width: 0; flex: 0 1 300px; }
-.theater-brand > span {
+.theater-brand-icon {
+  display: block;
   flex: 0 0 42px;
+  width: 42px;
   height: 42px;
-  border-radius: 15px;
-  background: var(--primary-container);
-  color: var(--on-primary-container);
 }
+.theater-wordmark {
+  color: var(--ink);
+  font: 400 13px/1 var(--font-display);
+  letter-spacing: -.04em;
+}
+.theater-wordmark strong { font-size: inherit; font-weight: 750; letter-spacing: inherit; }
 .scene-name { display: grid; min-width: 0; flex: 1; }
 .scene-name small {
   display: flex;

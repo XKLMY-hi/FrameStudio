@@ -1,6 +1,6 @@
 {
   "name": "live2d-pocket-studio",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "private": true,
   "type": "module",
   "description": "Offline portable Live2D timeline and compositing studio",

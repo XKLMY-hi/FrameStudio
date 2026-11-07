@@ -1,6 +1,9 @@
 import fs from 'node:fs/promises';import path from 'node:path';import {fileURLToPath} from 'node:url';import {spawnSync} from 'node:child_process';
 const root=fileURLToPath(new URL('../',import.meta.url));const {version}=JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8'));const release=path.join(root,'release');await fs.mkdir(release,{recursive:true});const dest=path.join(release,'FrameStudio-'+version+'-portable');try{await fs.access(dest);throw Error('Release already exists; use a fresh version directory to preserve the prior build.');}catch(e){if(e.code!=='ENOENT')throw e;}
 await fs.cp(path.join(root,'node_modules/electron/dist'),dest,{recursive:true});await fs.rename(path.join(dest,'electron.exe'),path.join(dest,'FrameStudio.exe'));
+const launcherIcon=spawnSync('python',[path.join(root,'scripts/set-windows-icon.py'),path.join(dest,'FrameStudio.exe'),path.join(root,'public/framestudio.ico')],{stdio:'inherit',windowsHide:true});
+if(launcherIcon.error) throw launcherIcon.error;
+if(launcherIcon.status!==0) throw Error('Failed to embed the FrameStudio launcher icon.');
 const appRoot=path.join(dest,'resources','app');await fs.mkdir(appRoot,{recursive:true});
 for(const dir of ['dist','backend','electron'])await fs.cp(path.join(root,dir),path.join(appRoot,dir),{recursive:true});
 await fs.mkdir(path.join(appRoot,'node_modules'),{recursive:true});await fs.cp(path.join(root,'node_modules/fflate'),path.join(appRoot,'node_modules/fflate'),{recursive:true});
@@ -12,6 +15,7 @@ await fs.copyFile(path.join(root,'README.md'),path.join(dest,'使用说明.md'))
 await fs.copyFile(path.join(root,'THIRD-PARTY-NOTICES.md'),path.join(dest,'第三方组件说明.md'));
 await fs.copyFile(path.join(root,'SHADERS.md'),path.join(dest,'SHADERS.md'));
 await fs.cp(path.join(root,'examples'),path.join(dest,'examples'),{recursive:true});
+await fs.cp(path.join(root,'docs/brand'),path.join(dest,'docs/brand'),{recursive:true});
 await fs.copyFile(path.join(root,'qa/场景灯光与模型预处理.livemg'),path.join(dest,'示例工程_场景灯光与模型预处理.livemg'));
 await fs.copyFile(path.join(root,'qa/v270-workspace.png'),path.join(dest,'界面预览.png'));
 await fs.copyFile(path.join(root,'qa/v261-curve.png'),path.join(dest,'曲线工作区预览.png'));

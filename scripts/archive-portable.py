@@ -16,6 +16,7 @@ source = release / f"FrameStudio-{version}-portable"
 app = source / "resources" / "app"
 baseline = release / f"FrameStudio-{args.baseline}-portable" / "resources" / "app"
 documents = ("使用说明.md", "第三方组件说明.md", "SHADERS.md", "examples/iris-film.fshader.json")
+brand_files = sorted(file for file in (source / "docs" / "brand").rglob("*") if file.is_file())
 
 patch_files = [app / "package.json"]
 for folder in ("dist", "backend", "electron"):
@@ -30,12 +31,13 @@ for folder in ("dist", "backend", "electron"):
 
 patch = release / f"FrameStudio_{version}_轻量更新补丁.zip"
 with ZipFile(patch, "w", compression=ZIP_DEFLATED) as archive:
-    for file in [*patch_files, *(source / name for name in documents)]:
+    for file in [*patch_files, *(source / name for name in documents), *brand_files]:
         archive.write(file, file.relative_to(source).as_posix())
     archive.writestr(
         "更新说明.txt",
         f"关闭 FrameStudio，将补丁解压到 FrameStudio.exe 所在目录，覆盖同名文件。\n"
-        f"重新打开后检查版本 {version}。功能变更见使用说明。\n",
+        f"重新打开后检查版本 {version}。功能变更见使用说明。\n"
+        "如果要更新资源管理器里显示的程序文件图标，请使用完整便携版中的 FrameStudio.exe。\n",
     )
 with ZipFile(patch) as archive:
     assert archive.testzip() is None

@@ -2476,11 +2476,13 @@ export default function TheaterApp() {
     >
       <header className="theater-header">
         <div className="theater-brand">
-          <span>
-            <Clapperboard size={20} />
-          </span>
+          <img className="theater-brand-icon" src="/icon.svg" width={42} height={42} alt="" />
           <label className="scene-name">
-            <small>FrameStudio · .livemg{dirty && <i title="草稿已更改" />}</small>
+            <small>
+              <span className="theater-wordmark"><strong>Frame</strong>Studio</span>
+              <span>· .livemg</span>
+              {dirty && <i title="草稿已更改" />}
+            </small>
             <input
               className="scene-title"
               aria-label="工程名称"

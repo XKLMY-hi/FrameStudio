@@ -1,12 +1,25 @@
-# FrameStudio 2.7.0
+# FrameStudio 2.7.1
 
 FrameStudio 是 Windows 上的离线 Live2D 小剧场编辑器。它支持多角色动作叠加、关键帧和曲线编辑、二维与三维预览、场景灯光、离线口型识别，以及带透明通道的视频导出。
 
 此仓库包含编辑器源码和测试。从源码启动请看下方「开发与验证」。便携版用户解压完整目录后双击 **FrameStudio.exe**，无需安装 Node.js、AE 或 Cubism Editor。移动便携版时请保留整个目录。
 
+## 视觉设计
+
+V2 图标将画幅、聚光灯和表演者组合在一起。编辑器延续黑白灰界面，琥珀色用于品牌图标里的光束。Windows 图标包含独立绘制的 16、24 和 32 px 版本。
+
+<details>
+<summary>展开 FrameStudio 品牌设计 V2</summary>
+
+![FrameStudio 品牌设计 V2，含应用图标、任务栏尺寸、深浅工作区和品牌色](docs/brand/framestudio-v2.png)
+
+[查看可编辑 SVG](docs/brand/framestudio-v2.svg)
+
+</details>
+
 ## 从旧版升级
 
-先关闭程序，将 **FrameStudio_2.7.0_轻量更新补丁.zip** 解压到 `FrameStudio.exe` 所在目录，覆盖同名程序文件。更早版本使用原 `帧间.exe` 所在目录。补丁不包含 data，不覆盖原有模型、音频和草稿。首次打开会将旧自动草稿迁移为多图层场景，旧草稿文件保留。旧 `.l2dstudio` 工程也可直接打开，再另存 `.livemg`。
+先关闭程序，将 **FrameStudio_2.7.1_轻量更新补丁.zip** 解压到 `FrameStudio.exe` 所在目录，覆盖同名程序文件。要同时更新资源管理器中的程序文件图标，请使用完整便携版里的 `FrameStudio.exe`。更早版本使用原 `帧间.exe` 所在目录。补丁不包含 data，不覆盖原有模型、音频和草稿。首次打开会将旧自动草稿迁移为多图层场景，旧草稿文件保留。旧 `.l2dstudio` 工程也可直接打开，再另存 `.livemg`。
 
 ## 2.7 文字动效、素材精修与着色器
 

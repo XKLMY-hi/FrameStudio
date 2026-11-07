@@ -44,7 +44,7 @@ export async function saveLivemg(project, data, thumbnail) {
       {
         format: "livemg",
         schemaVersion: 2,
-        appVersion: "2.7.0",
+        appVersion: "2.7.1",
         savedAt: new Date().toISOString(),
         files: Object.entries(files).map(([file, bytes]) => ({
           file,

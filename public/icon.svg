@@ -1,1 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="15" fill="#222b43"/><path d="m32 12 23 12-23 12L9 24z" fill="#b3bcff"/><path d="m10 34 22 12 22-12M10 44l22 12 22-12" fill="none" stroke="#b3bcff" stroke-width="4" stroke-linejoin="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" font-family="Segoe UI, Microsoft YaHei, sans-serif"><title>FrameStudio 应用图标</title>
+  <defs>
+    <linearGradient id="master-tile" x2="0.75" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#34383f"/><stop offset=".53" stop-color="#1b1d21"/><stop offset="1" stop-color="#101113"/>
+    </linearGradient>
+    <linearGradient id="master-beam" x2="0" y2="1">
+      <stop stop-color="#ffba69"/><stop offset=".68" stop-color="#e59a4e" stop-opacity=".66"/>
+      <stop offset="1" stop-color="#ffae5c" stop-opacity=".22"/>
+    </linearGradient>
+    <radialGradient id="master-pool"><stop stop-color="#ffc98e" stop-opacity=".52"/><stop offset="1" stop-color="#f7a451" stop-opacity="0"/></radialGradient>
+    <clipPath id="master-aperture"><rect x="92" y="92" width="328" height="328" rx="77"/></clipPath>
+  </defs>
+  <rect x="2" y="2" width="508" height="508" rx="111" fill="url(#master-tile)" stroke="#484c54" stroke-width="4"/>
+  <rect x="87" y="87" width="338" height="338" rx="82" fill="#151619" />
+  <g clip-path="url(#master-aperture)">
+    <path d="M220 145H292L393 409H119Z" fill="url(#master-beam)"/>
+    <ellipse cx="256" cy="386" rx="106" ry="25" fill="url(#master-pool)"/>
+    <ellipse cx="256" cy="382" rx="38" ry="5" fill="#ffe0b6" opacity=".34"/>
+    <rect x="223" y="134" width="66" height="17" rx="8.5" fill="#ffe4c2" />
+    <circle cx="256" cy="312" r="23" fill="#fff7e9" />
+  </g>
+  <rect x="86" y="86" width="340" height="340" rx="83" fill="none" stroke="#f5f2ea" stroke-width="18"/></svg>
