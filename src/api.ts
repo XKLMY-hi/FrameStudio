@@ -1,0 +1,4 @@
+export const token=new URL(location.href).searchParams.get('token')||'local-development';
+export const media=(p:string)=>`/media/${p.split('/').map(encodeURIComponent).join('/')}?token=${encodeURIComponent(token)}`;
+export async function api<T=any>(p:string,body?:any,headers:Record<string,string>={}):Promise<T>{const res=await fetch('/api/'+p,{method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer '+token,...(!(body instanceof Blob)&&body!==undefined?{'Content-Type':'application/json'}:{}),...headers},body:body===undefined?undefined:body instanceof Blob?body:JSON.stringify(body)});if(!res.ok){const err=await res.json().catch(()=>({error:'请求失败'}));throw Error(err.error||res.statusText);}return res.json();}
+export function download(blob:Blob,name:string){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),30000);}

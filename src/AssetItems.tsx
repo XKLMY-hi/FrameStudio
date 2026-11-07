@@ -1,0 +1,5 @@
+import {memo,useMemo} from 'react';import {Music2,Diamond,Eye,Activity,Plus} from 'lucide-react';import {Asset} from './types';
+export const AssetItems=memo(function AssetItems({assets,filter,search,onAdd}:{assets:Asset[];filter:string;search:string;onAdd:(id:string)=>void}){
+ const visible=useMemo(()=>assets.filter(a=>(filter==='all'||a.kind===filter)&&a.name.toLowerCase().includes(search.toLowerCase())),[assets,filter,search]);
+ return <div className="assets-list">{visible.map(a=><div className={`asset-item ${a.kind}`} key={a.id} draggable onDragStart={e=>e.dataTransfer.setData('asset',a.id)} onDoubleClick={()=>onAdd(a.id)}><div className="asset-type-icon">{a.kind==='audio'?<Music2 size={17}/>:a.kind==='keyframe'?<Diamond size={17}/>:a.kind==='expression'?<Eye size={17}/>:<Activity size={17}/>}</div><div className="asset-copy"><strong title={a.name}>{a.name.replace(/^mtn_/,'')}</strong><span>{a.duration.toFixed(4)}s · {a.expression?.length??a.curves.length} 参数</span></div><button title="添加到播放头位置" onClick={()=>onAdd(a.id)}><Plus size={16}/></button></div>)}{!visible.length&&<div className="empty-state">没有匹配的素材<br/>导入动作或创建参数关键帧</div>}</div>;
+});

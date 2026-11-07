@@ -1,0 +1,15 @@
+Live2D Cubism Core 5.1
+Copyright Live2D Inc. Distributed as part of this Live2D web application.
+The original copyright and proprietary SDK license header is retained in live2dcubismcore.min.js.
+https://www.live2d.com/en/sdk/license/
+
+PixiJS 6.5.10
+Copyright PixiJS contributors. MIT License; original distribution header retained.
+https://github.com/pixijs/pixijs/blob/v6.5.10/LICENSE
+
+pixi-live2d-display 0.4.0
+Copyright guansss and contributors. MIT License.
+https://github.com/guansss/pixi-live2d-display/blob/v0.4.0/LICENSE
+
+The model and original character artwork are user-supplied materials. This application does not change their ownership.
+The modified garment illustration was generated with the built-in ImageGen tool.

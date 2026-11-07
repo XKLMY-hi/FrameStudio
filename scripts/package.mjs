@@ -1,0 +1,18 @@
+import fs from 'node:fs/promises';import path from 'node:path';import {fileURLToPath} from 'node:url';import {spawnSync} from 'node:child_process';
+const root=fileURLToPath(new URL('../',import.meta.url));const {version}=JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8'));const release=path.join(root,'release');await fs.mkdir(release,{recursive:true});const dest=path.join(release,'FrameStudio-'+version+'-portable');try{await fs.access(dest);throw Error('Release already exists; use a fresh version directory to preserve the prior build.');}catch(e){if(e.code!=='ENOENT')throw e;}
+await fs.cp(path.join(root,'node_modules/electron/dist'),dest,{recursive:true});await fs.rename(path.join(dest,'electron.exe'),path.join(dest,'FrameStudio.exe'));
+const appRoot=path.join(dest,'resources','app');await fs.mkdir(appRoot,{recursive:true});
+for(const dir of ['dist','backend','electron'])await fs.cp(path.join(root,dir),path.join(appRoot,dir),{recursive:true});
+await fs.mkdir(path.join(appRoot,'node_modules'),{recursive:true});await fs.cp(path.join(root,'node_modules/fflate'),path.join(appRoot,'node_modules/fflate'),{recursive:true});
+await fs.writeFile(path.join(appRoot,'package.json'),JSON.stringify({name:'live2d-pocket-studio',productName:'FrameStudio',version,type:'module',main:'electron/main.cjs'},null,2));
+await fs.mkdir(path.join(appRoot,'tools'),{recursive:true});await fs.copyFile(path.join(root,'tools/ffmpeg.exe'),path.join(appRoot,'tools/ffmpeg.exe'));
+const rhBase=path.join(root,'tools/rhubarb/Rhubarb-Lip-Sync-1.14.0-Windows'),rhDest=path.join(appRoot,'tools/rhubarb');await fs.mkdir(rhDest,{recursive:true});for(const f of ['rhubarb.exe','res','LICENSE.md','README.adoc'])await fs.cp(path.join(rhBase,f),path.join(rhDest,f),{recursive:true});
+await fs.mkdir(path.join(appRoot,'data/models'),{recursive:true});await fs.cp(path.join(root,'data/models/demo'),path.join(appRoot,'data/models/demo'),{recursive:true});
+await fs.copyFile(path.join(root,'README.md'),path.join(dest,'使用说明.md'));
+await fs.copyFile(path.join(root,'THIRD-PARTY-NOTICES.md'),path.join(dest,'第三方组件说明.md'));
+await fs.copyFile(path.join(root,'qa/场景灯光与模型预处理.livemg'),path.join(dest,'示例工程_场景灯光与模型预处理.livemg'));
+await fs.copyFile(path.join(root,'qa/v251-menu.png'),path.join(dest,'界面预览.png'));
+await fs.copyFile(path.join(root,'qa/v252-motion-tree.png'),path.join(dest,'曲线工作区预览.png'));
+await fs.copyFile(path.join(root,'qa/v22-preprocess.png'),path.join(dest,'模型预处理预览.png'));
+const license=spawnSync(path.join(root,'tools/ffmpeg.exe'),['-L'],{encoding:'utf8',windowsHide:true});await fs.writeFile(path.join(dest,'FFmpeg-LICENSE.txt'),license.stdout+license.stderr);
+console.log(dest);
