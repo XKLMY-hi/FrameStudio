@@ -18,6 +18,20 @@ baseline = release / f"FrameStudio-{args.baseline}-portable" / "resources" / "ap
 documents = ("使用说明.md", "第三方组件说明.md", "SHADERS.md", "examples/iris-film.fshader.json")
 brand_files = sorted(file for file in (source / "docs" / "brand").rglob("*") if file.is_file())
 
+portable_files = sorted(file for file in source.rglob("*") if file.is_file())
+if not (source / "FrameStudio.exe").is_file():
+    parser.error(f"Portable build not found: {source}")
+
+asset_extensions = (
+    ".zip", ".livemg", ".l2dstudio", ".moc", ".moc3", ".model3.json", ".motion3.json",
+    ".physics3.json", ".exp3.json", ".pose3.json", ".cdi3.json", ".userdata3.json",
+)
+for file in portable_files:
+    relative = file.relative_to(source)
+    parts = tuple(part.casefold() for part in relative.parts)
+    if parts[:3] == ("resources", "app", "data") or file.name.casefold().endswith(asset_extensions):
+        parser.error(f"Remove local project or model data from the public build: {relative}")
+
 patch_files = [app / "package.json"]
 for folder in ("dist", "backend", "electron"):
     for file in sorted((app / folder).rglob("*")):
@@ -45,9 +59,8 @@ with ZipFile(patch) as archive:
 
 portable = release / f"FrameStudio_{version}_便携版.zip"
 with ZipFile(portable, "w", compression=ZIP_DEFLATED) as archive:
-    for file in sorted(source.rglob("*")):
-        if file.is_file():
-            archive.write(file, file.relative_to(release).as_posix())
+    for file in portable_files:
+        archive.write(file, file.relative_to(release).as_posix())
 with ZipFile(portable) as archive:
     assert archive.testzip() is None
     assert f"{source.name}/FrameStudio.exe" in archive.namelist()

@@ -21,6 +21,11 @@
 *.moc3
 *.model3.json
 *.motion3.json
+*.physics3.json
+*.exp3.json
+*.pose3.json
+*.cdi3.json
+*.userdata3.json
 .DS_Store
 Thumbs.db
 __pycache__/

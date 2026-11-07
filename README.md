@@ -1,8 +1,12 @@
-# FrameStudio 2.7.1
+# FrameStudio 2.7.2
+
+![FrameStudio 品牌头图，画幅中的琥珀色聚光灯](docs/brand/framestudio-banner.png)
 
 FrameStudio 是 Windows 上的离线 Live2D 小剧场编辑器。它支持多角色动作叠加、关键帧和曲线编辑、二维与三维预览、场景灯光、离线口型识别，以及带透明通道的视频导出。
 
 此仓库包含编辑器源码和测试。从源码启动请看下方「开发与验证」。便携版用户解压完整目录后双击 **FrameStudio.exe**，无需安装 Node.js、AE 或 Cubism Editor。移动便携版时请保留整个目录。
+
+公开仓库和便携发行包不附带 Live2D 模型、模型素材或含模型的工程。启动后可在「素材 → 模型」导入你有权使用的模型。
 
 ## 视觉设计
 
@@ -13,13 +17,13 @@ V2 图标将画幅、聚光灯和表演者组合在一起。编辑器延续黑�
 
 ![FrameStudio 品牌设计 V2，含应用图标、任务栏尺寸、深浅工作区和品牌色](docs/brand/framestudio-v2.png)
 
-[查看可编辑 SVG](docs/brand/framestudio-v2.svg)
+[品牌设计 SVG](docs/brand/framestudio-v2.svg) · [仓库头图 SVG](docs/brand/framestudio-banner.svg)
 
 </details>
 
 ## 从旧版升级
 
-先关闭程序，将 **FrameStudio_2.7.1_轻量更新补丁.zip** 解压到 `FrameStudio.exe` 所在目录，覆盖同名程序文件。要同时更新资源管理器中的程序文件图标，请使用完整便携版里的 `FrameStudio.exe`。更早版本使用原 `帧间.exe` 所在目录。补丁不包含 data，不覆盖原有模型、音频和草稿。首次打开会将旧自动草稿迁移为多图层场景，旧草稿文件保留。旧 `.l2dstudio` 工程也可直接打开，再另存 `.livemg`。
+先关闭程序，将 **FrameStudio_2.7.2_轻量更新补丁.zip** 解压到 `FrameStudio.exe` 所在目录，覆盖同名程序文件。要同时更新资源管理器中的程序文件图标，请使用完整便携版里的 `FrameStudio.exe`。更早版本使用原 `帧间.exe` 所在目录。补丁不包含 data，不覆盖原有模型、音频和草稿。首次打开会将旧自动草稿迁移为多图层场景，旧草稿文件保留。旧 `.l2dstudio` 工程也可直接打开，再另存 `.livemg`。
 
 ## 2.7 文字动效、素材精修与着色器
 
@@ -135,8 +139,6 @@ V2 图标将画幅、聚光灯和表演者组合在一起。编辑器延续黑�
 
 支持 Cubism 3/4/5 model3 运行时模型；暂不包含 Cubism 2 `.moc` 渲染、模型拆件、视频素材轨、音频降噪/频谱编辑、3D 网格、逐字字幕或真实三维法线照明。
 
-随包 `示例工程_场景灯光与模型预处理.livemg` 演示两个独立模型控制器、共享暖色面光和冷色补光、素材预处理及独立实例后处理。示例模型仅供当前用户本地演示，不构成角色或模型素材的转授权。
-
 ## 开发与验证
 
 在 Windows 上使用 Node.js 22.12 或更高版本。运行前，将 Live2D Cubism Core for Web 的 `live2dcubismcore.min.js` 放到 `public/vendor/`，供模型预览使用。通过编辑器导入自己的模型即可开始编辑。
@@ -148,7 +150,7 @@ npm test
 npm start
 ```
 
-如需视频导出，将 FFmpeg 放到 `tools/ffmpeg.exe`。如需离线口型识别，将 Rhubarb Lip Sync 1.14.0 的 Windows 发行目录（含资源）解压到 `tools/rhubarb/`。公开仓库只保存源码，便携打包和完整界面验收另外需要本地工具、示例工程和验收素材。组件及来源见 [第三方组件说明](THIRD-PARTY-NOTICES.md)。
+如需视频导出，将 FFmpeg 放到 `tools/ffmpeg.exe`。如需离线口型识别，将 Rhubarb Lip Sync 1.14.0 的 Windows 发行目录（含资源）解压到 `tools/rhubarb/`。便携打包使用本地工具，含模型的界面验收使用本地素材。组件及来源见 [第三方组件说明](THIRD-PARTY-NOTICES.md)。
 
 50 项单元测试覆盖原动作引擎、场景变换、显式对象绑定、预设副本与工程格式。UI/导出测试在独立 QA 副本运行，不修改用户已解压的便携版。
 
