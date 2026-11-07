@@ -1,32 +1,75 @@
 import React from "react";
 import { ModelResource, SceneEffects, sceneEffects } from "./schema";
+import { lookPresets, neutralLook, type ModelLook } from "./model-look";
 export function ModelPreprocessPanel({
   resource,
+  instances,
+  original,
+  onCompare,
   onChange,
 }: {
   resource?: ModelResource;
+  instances: readonly string[];
+  original: boolean;
+  onCompare: (value: boolean) => void;
   onChange: (value: NonNullable<ModelResource["preprocess"]>) => void;
 }) {
   if (!resource)
     return <p className="empty-state">先导入或选择一个模型素材。</p>;
   const e = resource.preprocess?.effects || sceneEffects(),
-    enabled = resource.preprocess?.enabled !== false;
+    enabled = resource.preprocess?.enabled !== false,
+    look = { ...neutralLook, ...resource.preprocess?.look };
   const set = (id: keyof SceneEffects, value: any) =>
-    onChange({ enabled, effects: { ...e, [id]: value } });
+    onChange({ enabled, effects: { ...e, [id]: value }, look });
+  const setLook = (id: keyof ModelLook, value: number) =>
+    onChange({ enabled, effects: e, look: { ...look, [id]: value } });
   return (
     <div className="preprocess-panel">
-      <h3>{resource.name}</h3>
       <p className="property-note">
         素材级基础质感，作用于使用此素材的所有实例。此预览不含场景光源、实例后处理和调整层。
       </p>
+      <div className="shader-actions" aria-label="对照预览">
+        <button aria-pressed={!original} onClick={() => onCompare(false)}>处理后</button>
+        <button aria-pressed={original} onClick={() => onCompare(true)}>查看原始</button>
+      </div>
+      <h3>素材精修</h3>
+      <div className="shader-actions">
+        {lookPresets.map(({ name, look }) => (
+          <button key={name} onClick={() => {
+            onChange({ enabled: true, effects: e, look: { ...look } });
+            onCompare(false);
+          }}>{name}</button>
+        ))}
+      </div>
+      {([
+        ["exposure", "曝光 / EV", -2, 2],
+        ["detail", "自适应锐化", 0, 1],
+        ["rolloff", "高光柔化", 0, 1],
+        ["edgeCleanup", "半透明边缘净化", 0, 1],
+        ["diffusion", "柔光扩散", 0, 1],
+      ] as const).map(([id, label, min, max]) => (
+        <label className="preprocess-value" key={id}>
+          <span>{label}</span>
+          <input aria-label={label} type="range" min={min} max={max} step=".01"
+            value={look[id]} onChange={e => setLook(id, +e.target.value)} />
+          <input aria-label={label + " 数值"} type="number" min={min} max={max} step=".01"
+            value={look[id]} onChange={e => setLook(id, Math.max(min, Math.min(max, +e.target.value)))} />
+        </label>
+      ))}
+      <div className="preprocess-instances">
+        <strong>使用此素材的实例 <small>{instances.length}</small></strong>
+        {instances.length ? (
+          <ul>{instances.map((name, i) => <li key={i}>{name}</li>)}</ul>
+        ) : <p>当前场景尚未使用此素材。</p>}
+      </div>
       <label className="toggle-line">
         <input
           aria-label="启用模型预处理"
           type="checkbox"
           checked={enabled}
-          onChange={(v) => onChange({ enabled: v.target.checked, effects: e })}
+          onChange={(v) => onChange({ enabled: v.target.checked, effects: e, look })}
         />
-        启用预处理（关闭可对比原始效果）
+        在工程中启用素材预处理
       </label>
       {(
         [

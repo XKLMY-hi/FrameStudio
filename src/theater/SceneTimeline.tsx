@@ -47,7 +47,6 @@ type Props = {
   onValue: (binding: Binding, value: number) => void;
   onWriteKeys: (binding: Binding, keys: Key[]) => void;
   onHeight: (n: number) => void;
-  height: number;
   time: number;
   playing: boolean;
   selection: string[];
@@ -72,13 +71,29 @@ type Props = {
   onCurve: (binding?: Binding) => void;
   curveOpen: boolean;
 };
+
+export function formatTimecode(frame: number, fps: number) {
+  const seconds = Math.floor(frame / fps);
+  return [
+    Math.floor(seconds / 3600),
+    Math.floor(seconds / 60) % 60,
+    seconds % 60,
+    frame % fps,
+  ].map((n) => String(n).padStart(2, "0")).join(":");
+}
+
 function Timeline(p: Props) {
   const scroller = useRef<HTMLDivElement>(null),
     scrollAnchor = useRef<number | undefined>(undefined),
     [dragging, setDragging] = useState(false),
-    label = 340,
+    label = 298,
     px = p.zoom,
     width = Math.max(700, p.scene.duration * px + 100);
+  const actorTones = useMemo(
+    () => new Map(p.scene.layers.filter((l) => l.kind === "model").map((l, i) => [l.id, i % 3])),
+    [p.scene.layers],
+  );
+  const frame = Math.round(p.time * p.scene.fps);
   useEffect(() => {
     const el = scroller.current!;
     const wheel = (e: WheelEvent) => {
@@ -330,6 +345,8 @@ function Timeline(p: Props) {
       <div
         key={c.id}
         data-clip-id={c.id}
+        data-actor-tone={actorTones.get(c.layerId)}
+        data-dialogue={c.kind === "audio" && c.lipEnabled ? true : undefined}
         className={`scene-clip ${c.kind} ${p.selection.includes(c.id) ? "selected" : ""} ${!c.enabled ? "disabled" : ""} ${summary ? "summary-clip" : ""}`}
         style={{ left: c.start * px, width: Math.max(9, c.duration * px) }}
         title={`${c.name} · ${c.duration.toFixed(6)} 秒`}
@@ -537,6 +554,7 @@ function Timeline(p: Props) {
         <div
           className={`ae-row ae-object ${l.id === p.selectedLayerId ? "selected-object" : ""} ${!l.visible ? "hidden-object" : ""}`}
           data-object-id={l.id}
+          data-layer-kind={l.kind}
           key={l.id}
         >
           <div
@@ -704,6 +722,7 @@ function Timeline(p: Props) {
   return (
     <section
       className={"scene-timeline ae-timeline " + (dragging ? "dragging" : "")}
+      style={{ "--timeline-label": label + "px" } as React.CSSProperties}
     >
       <div
         className="timeline-resize"
@@ -711,10 +730,10 @@ function Timeline(p: Props) {
         onPointerDown={(e) => {
           e.preventDefault();
           const y = e.clientY,
-            h = p.height;
+            h = e.currentTarget.parentElement!.clientHeight;
           const move = (ev: PointerEvent) =>
             p.onHeight(
-              clamp(h + y - ev.clientY, 200, window.innerHeight * 0.7),
+              clamp(h + y - ev.clientY, 210, window.innerHeight * 0.47),
             );
           const up = () => {
             window.removeEventListener("pointermove", move);
@@ -726,6 +745,7 @@ function Timeline(p: Props) {
       />
       <div className="scene-transport">
         <div>
+          <div className="playback-group" aria-label="播放控制">
           <button
             title="回到工作区起点"
             onClick={() => p.onSeek(p.scene.workArea.start)}
@@ -739,8 +759,6 @@ function Timeline(p: Props) {
           >
             {p.playing ? <Pause size={17} /> : <Play size={17} />}
           </button>
-          <span className="scene-nowclock">{p.time.toFixed(3)}s</span>
-          <span className="muted">/ {p.scene.duration.toFixed(2)}s</span>
           <button
             title="循环工作区"
             className={p.scene.workArea.loop ? "active" : ""}
@@ -754,6 +772,11 @@ function Timeline(p: Props) {
           >
             <Repeat2 size={16} />
           </button>
+          </div>
+          <div className="timecode-block">
+            <span className="scene-nowclock" title={p.time.toFixed(3) + " 秒"}>{formatTimecode(frame, p.scene.fps)}</span>
+            <small>帧 <span data-now-frame>{frame}</span> / {Math.round(p.scene.duration * p.scene.fps)} · {p.scene.fps} fps</small>
+          </div>
           <label className="work-input">
             工作区
             <input
@@ -816,12 +839,10 @@ function Timeline(p: Props) {
           >
             <Magnet size={15} />
           </button>
-          <button
-            className={p.curveOpen ? "active" : ""}
-            onClick={() => p.onCurve()}
-          >
-            关键帧
-          </button>
+          <div className="timeline-mode" aria-label="底部工作区">
+            <span>时间线</span>
+            <button aria-label="关键帧" onClick={() => p.onCurve()}>曲线</button>
+          </div>
           <input
             aria-label="时间线缩放"
             className="timeline-zoom"

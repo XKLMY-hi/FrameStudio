@@ -9,6 +9,9 @@ import {
   defaultEffects,
   uid,
 } from "../types";
+import type { TextAnimation, TitleMotion } from "./text-motion";
+import type { ShaderRecipe } from "./stylize";
+import type { ModelLook } from "./model-look";
 export type Transform = {
   x: number;
   y: number;
@@ -24,6 +27,8 @@ export type SceneEffects = Effects & {
   blur: number;
   blurMode?: "gaussian" | "lens";
   bokeh?: number;
+  stylize?: ShaderRecipe;
+  stylizeMix?: number;
 };
 export type MediaAsset = {
   id: string;
@@ -44,7 +49,7 @@ export type ModelResource = {
   modelId: string;
   file: string;
   assets: Asset[];
-  preprocess?: { enabled: boolean; effects: SceneEffects };
+  preprocess?: { enabled: boolean; effects: SceneEffects; look?: ModelLook };
 };
 export type SceneLight = {
   type: "point" | "area" | "sun" | "ambient";
@@ -109,8 +114,12 @@ export type Layer = {
     align: "left" | "center" | "right";
     stroke: string;
     strokeWidth: number;
-    animation: "none" | "typewriter" | "fade" | "typewriter-fade";
+    animation: TextAnimation;
     charsPerSecond: number;
+    entranceDuration?: number;
+    exit?: TitleMotion;
+    exitDuration?: number;
+    motionAmount?: number;
   };
   model?: {
     resourceId: string;

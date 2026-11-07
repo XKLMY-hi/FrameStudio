@@ -97,6 +97,20 @@ export async function createStudioServer({
     audio = path.join(data, "audio"),
     exports = path.join(data, "exports"),
     jobs = new Map();
+  const preferenceFile = path.join(data, "preferences.json");
+  const accents = ["mono", "blue", "violet", "rose"];
+  async function readPreferences() {
+    try {
+      const value = JSON.parse(await fs.readFile(preferenceFile, "utf8"));
+      return {
+        appearance: ["light", "dark"].includes(value?.appearance) ? value.appearance : "system",
+        accent: accents.includes(value?.accent) ? value.accent : "mono",
+      };
+    } catch {
+      return { appearance: "system", accent: "mono" };
+    }
+  }
+  let preferenceWrites = Promise.resolve();
   await Promise.all(
     [models, audio, exports].map((p) => fs.mkdir(p, { recursive: true })),
   );
@@ -212,21 +226,26 @@ export async function createStudioServer({
           dataDir: data,
         });
       if (url.pathname === "/api/preferences") {
-        const file = path.join(data, "preferences.json");
         if (req.method === "POST") {
-          const { appearance } = JSON.parse(
+          const { appearance, accent } = JSON.parse(
             (await bytes(req, 4096)).toString("utf8"),
           );
           if (!["light", "dark", "system"].includes(appearance))
             return send({ error: "无效外观设置" }, 400);
-          await fs.writeFile(file, JSON.stringify({ appearance }), "utf8");
-          return send({ appearance });
+          if (accent !== undefined && !accents.includes(accent))
+            return send({ error: "无效强调色" }, 400);
+          const write = preferenceWrites.then(async () => {
+            const next = { appearance, accent: accent ?? (await readPreferences()).accent };
+            const temp = preferenceFile + ".tmp";
+            await fs.writeFile(temp, JSON.stringify(next), "utf8");
+            await fs.rename(temp, preferenceFile);
+            return next;
+          });
+          preferenceWrites = write.catch(() => {});
+          return send(await write);
         }
-        try {
-          return send(JSON.parse(await fs.readFile(file, "utf8")));
-        } catch {
-          return send({ appearance: "system" });
-        }
+        await preferenceWrites;
+        return send(await readPreferences());
       }
       if (url.pathname === "/api/model-import" && req.method === "POST") {
         const name = decodeURIComponent(

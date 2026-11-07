@@ -782,7 +782,7 @@
 .ae-timeline .summary-clip {height:23px;top:4px;opacity:.9}
 .ae-timeline .timeline-diamond {font-size:12px;top:0;min-height:22px;height:22px;padding:0 2px;touch-action:none}
 .ae-timeline .scene-playhead {z-index:7}
-.ae-hint {font-size:9px;color:light-dark(#a18aae,#b6a9c4)!important;padding-left:32px}
+.ae-hint {font-size:9px;color:var(--ink-muted)!important;padding-left:32px}
 .ae-object.hidden-object {opacity:.5}
 .ae-timeline .scene-timeline-footer {font-size:9px;min-height:20px;height:20px}
 .audio-library-preview {flex-basis:100%;display:flex;flex-direction:column;gap:3px;width:100%;font-size:9px;color:light-dark(#668777,#b6a9c4);padding:5px 0 0}

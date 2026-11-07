@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { X, Plus, Focus } from "lucide-react";
+import { ArrowLeft, Plus, Focus } from "lucide-react";
 import type { Key, Param } from "../types";
 import { clamp, sampleCurve } from "../engine";
 import { bindingId, readProperty, type Binding } from "./properties";
@@ -28,10 +28,10 @@ type Props = {
   close: () => void;
 };
 const colors = [
-  "#a984ed",
+  "var(--primary)",
   "#5aa6d9",
   "#67b694",
-  "#db9c55",
+  "#db877e",
   "#e77d9f",
   "#78b6bb",
 ];
@@ -362,6 +362,32 @@ export function CurveWorkspace(p: Props) {
   );
   return (
     <section className="curve-workspace" aria-label="曲线编辑器">
+      <div className="curve-workspace-header">
+        <div className="timeline-mode" aria-label="底部工作区">
+          <button onClick={p.close}>时间线</button>
+          <span>曲线</span>
+        </div>
+        <div className="curve-quick-presets" aria-label="常用插值预设">
+          {curvePresets.filter(({ id }) =>
+            ["hold", "linear", "easeIn", "easeOut", "smooth", "anticipate", "overshoot", "spring", "bounce"].includes(id)
+          ).map((preset) => (
+            <button
+              key={preset.id}
+              title={preset.label}
+              disabled={!active || selectedSegment === undefined}
+              onClick={() => {
+                if (active && selectedSegment !== undefined)
+                  change(active, applyCurvePreset(active.keys, [selectedSegment], preset.id));
+              }}
+            >
+              {preset.label.split(" · ")[0]}
+            </button>
+          ))}
+        </div>
+        <button title="关闭关键帧编辑器" onClick={p.close}>
+          <ArrowLeft size={14} /> 返回时间线
+        </button>
+      </div>
       <CurveChannelTree
         catalog={catalog}
         scene={p.scene}
@@ -654,9 +680,6 @@ export function CurveWorkspace(p: Props) {
       <aside className="curve-inspector">
         <div className="curve-top">
           <strong>曲线属性</strong>
-          <button title="关闭关键帧编辑器" onClick={p.close}>
-            <X size={15} />
-          </button>
         </div>
         {active && (
           <>

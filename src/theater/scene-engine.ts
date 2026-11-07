@@ -9,6 +9,7 @@ import {
   Transform,
 } from "./schema";
 import { current, isDraft } from "immer";
+import { titleCharacters } from "./text-motion";
 export function cloneData<T>(value: T): T {
   return structuredClone(isDraft(value) ? current(value as any) : value);
 }
@@ -287,18 +288,21 @@ export function spatialLayer(
 }
 export function textAt(s: Scene, l: Layer, t: number) {
   if (!l.text) return "";
+  const typewriter = l.text.animation?.includes("typewriter");
+  if (!typewriter && !l.animation.reveal?.length) return l.text.value;
   const value = l.text.value,
-    local = localLayerTime(s, l, t);
+    local = localLayerTime(s, l, t),
+    characters = titleCharacters(value);
   let n = 1;
-  if (l.text.animation.includes("typewriter"))
+  if (typewriter)
     n = clamp(
-      (local * l.text.charsPerSecond) / Math.max(1, Array.from(value).length),
+      (local * l.text.charsPerSecond) / Math.max(1, characters.length),
       0,
       1,
     );
   n = sampleKeys(l.animation.reveal, local, n);
-  return Array.from(value)
-    .slice(0, Math.floor(Array.from(value).length * n))
+  return characters
+    .slice(0, Math.floor(characters.length * clamp(n, 0, 1)))
     .join("");
 }
 const graphCache = new WeakMap<Scene, Map<string, Project>>();
@@ -481,8 +485,27 @@ export function reparentSafe(s: Scene, id: string, parentId: string | null) {
   if (l) l.parentId = parentId;
   return !!l;
 }
-export function duplicateTree(s: Scene, id: string) {
-  const ids = new Set([id]);
+export type LayerClipboard = {
+  sceneId: string;
+  roots: string[];
+  layers: Layer[];
+  tracks: SceneTrack[];
+  parentOffsets: Record<string, [number, number, number]>;
+};
+
+export function copyLayerTrees(s: Scene, selection: readonly string[], t = 0): LayerClipboard {
+  const layerIndex = new Map(s.layers.map(l => [l.id, l]));
+  const selected = new Set(selection);
+  const roots = s.layers.filter(l => {
+    if (!selected.has(l.id)) return false;
+    const seen = new Set([l.id]);
+    for (let parent = l.parentId; parent && !seen.has(parent); parent = layerIndex.get(parent)?.parentId ?? null) {
+      if (selected.has(parent)) return false;
+      seen.add(parent);
+    }
+    return true;
+  });
+  const ids = new Set(roots.map(l => l.id));
   let more = true;
   while (more) {
     more = false;
@@ -492,25 +515,56 @@ export function duplicateTree(s: Scene, id: string) {
         more = true;
       }
   }
-  const map = new Map([...ids].map((id) => [id, crypto.randomUUID()]));
-  const layers = s.layers
-    .filter((l) => ids.has(l.id))
-    .map((original) => {
+  const parentOffsets: LayerClipboard["parentOffsets"] = {};
+  for (const root of roots) {
+    const matrix = worldMatrix(s, root, t);
+    const { x, y, z } = animatedLayer(s, root, t).transform;
+    parentOffsets[root.id] = [matrix[12] - x, matrix[13] - y, matrix[14] - z];
+  }
+  return {
+    sceneId: s.id,
+    roots: roots.map(l => l.id),
+    layers: s.layers.filter(l => ids.has(l.id)).map(cloneData),
+    tracks: s.tracks.flatMap(tr => {
+      const clips = tr.clips.filter(c => ids.has(c.layerId)).map(cloneData);
+      return clips.length ? [{ ...cloneData(tr), clips }] : [];
+    }),
+    parentOffsets,
+  };
+}
+
+export function pasteLayerTrees(s: Scene, copied: LayerClipboard, offset = 0) {
+  if (s.id !== copied.sceneId) return [];
+  const map = new Map(copied.layers.map((l) => [l.id, crypto.randomUUID()]));
+  const roots = new Set(copied.roots);
+  const layers = copied.layers.map((original) => {
       const l = cloneData(original);
       l.id = map.get(l.id)!;
       if (l.parentId && map.has(l.parentId)) l.parentId = map.get(l.parentId)!;
+      else if (l.parentId && !s.layers.some(parent => parent.id === l.parentId)) {
+        l.parentId = null;
+        const position = copied.parentOffsets[original.id];
+        if (position) {
+          // An absent parent cannot contribute its transform to the pasted layer.
+          for (const [index, id] of (["x", "y", "z"] as const).entries()) {
+            const shift = position[index];
+            l.transform[id] += shift;
+            for (const key of l.animation[id] ?? []) key.v += shift;
+          }
+        }
+      }
       if (l.light)
         l.light.targets = l.light.targets.map((id) => map.get(id) || id);
-      if (original.id === id) {
+      if (roots.has(original.id)) {
         l.name += " 副本";
-        l.transform.x += 80;
+        l.transform.x += offset;
+        for (const key of l.animation.x ?? []) key.v += offset;
       }
       return l;
     });
   const tracks: SceneTrack[] = [];
-  for (const tr of s.tracks) {
+  for (const tr of copied.tracks) {
     const clips = tr.clips
-      .filter((c) => ids.has(c.layerId))
       .map((c) => ({
         ...cloneData(c),
         id: crypto.randomUUID(),
@@ -530,5 +584,9 @@ export function duplicateTree(s: Scene, id: string) {
   }
   s.layers.push(...layers);
   s.tracks.push(...tracks);
-  return map.get(id)!;
+  return copied.roots.map(id => map.get(id)!);
+}
+
+export function duplicateTree(s: Scene, id: string) {
+  return pasteLayerTrees(s, copyLayerTrees(s, [id]), 80)[0];
 }

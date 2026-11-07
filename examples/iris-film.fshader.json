@@ -1,0 +1,20 @@
+{
+  "format": "framestudio-shader",
+  "version": 1,
+  "name": "虹膜胶片",
+  "passes": [
+    {
+      "op": "matrix",
+      "amount": 0.7,
+      "matrix": [1.05, 0.05, 0, 0, 0.88, 0.04, 0.12, 0.04, 1.08],
+      "bias": [0, 0.015, 0.025]
+    },
+    {
+      "op": "film",
+      "amount": 0.38,
+      "scale": 2,
+      "dark": "#221737",
+      "light": "#ffe0d4"
+    }
+  ]
+}

@@ -10,9 +10,11 @@ const rhBase=path.join(root,'tools/rhubarb/Rhubarb-Lip-Sync-1.14.0-Windows'),rhD
 await fs.mkdir(path.join(appRoot,'data/models'),{recursive:true});await fs.cp(path.join(root,'data/models/demo'),path.join(appRoot,'data/models/demo'),{recursive:true});
 await fs.copyFile(path.join(root,'README.md'),path.join(dest,'使用说明.md'));
 await fs.copyFile(path.join(root,'THIRD-PARTY-NOTICES.md'),path.join(dest,'第三方组件说明.md'));
+await fs.copyFile(path.join(root,'SHADERS.md'),path.join(dest,'SHADERS.md'));
+await fs.cp(path.join(root,'examples'),path.join(dest,'examples'),{recursive:true});
 await fs.copyFile(path.join(root,'qa/场景灯光与模型预处理.livemg'),path.join(dest,'示例工程_场景灯光与模型预处理.livemg'));
-await fs.copyFile(path.join(root,'qa/v251-menu.png'),path.join(dest,'界面预览.png'));
-await fs.copyFile(path.join(root,'qa/v252-motion-tree.png'),path.join(dest,'曲线工作区预览.png'));
-await fs.copyFile(path.join(root,'qa/v22-preprocess.png'),path.join(dest,'模型预处理预览.png'));
+await fs.copyFile(path.join(root,'qa/v270-workspace.png'),path.join(dest,'界面预览.png'));
+await fs.copyFile(path.join(root,'qa/v261-curve.png'),path.join(dest,'曲线工作区预览.png'));
+await fs.copyFile(path.join(root,'qa/v270-preprocess.png'),path.join(dest,'模型预处理预览.png'));
 const license=spawnSync(path.join(root,'tools/ffmpeg.exe'),['-L'],{encoding:'utf8',windowsHide:true});await fs.writeFile(path.join(dest,'FFmpeg-LICENSE.txt'),license.stdout+license.stderr);
 console.log(dest);

@@ -12,6 +12,9 @@ import {
 import { worldLights, lightUniforms, normalize } from "./lighting";
 import { sceneVertex, sceneFragment } from "./lighting-shader";
 import { depthOrder, planeQuad, type DepthPolygon } from "./depth-order";
+import { titlePose } from "./text-motion";
+import { lookFragment, neutralLook } from "./model-look";
+import { shaderOpIndex, stylizeFragment, validateShaderRecipe, type ShaderRecipe } from "./stylize";
 import type { GizmoAxis, OverlayFrame } from "./ViewportOverlay";
 import { pivotOf, selectionRoots } from "./viewport-selection";
 import { clippedStroke, planeRay } from "./view-occlusion";
@@ -36,9 +39,20 @@ import {
   modelProject,
   spatialLayer,
   textAt,
+  visualClip,
+  localLayerTime,
   worldMatrix,
 } from "./scene-engine";
 const neutralPreprocess = sceneEffects();
+const checkedRecipes = new WeakMap<object, ShaderRecipe | null>();
+function checkedRecipe(recipe?: ShaderRecipe) {
+  if (!recipe || typeof recipe !== "object") return null;
+  if (!checkedRecipes.has(recipe)) {
+    try { checkedRecipes.set(recipe, validateShaderRecipe(recipe)); }
+    catch { checkedRecipes.set(recipe, null); }
+  }
+  return checkedRecipes.get(recipe);
+}
 const effectFragment = postFragment
   .replace(
     "uniform float pixelScale;",
@@ -57,6 +71,10 @@ type Node = {
   texture?: any;
   text?: any;
   textKey?: string;
+  textFrame?: string;
+  textGroup?: any;
+  textMask?: any;
+  textEchoes?: any[];
   graphic?: any;
   size?: string;
   source?: string;
@@ -66,6 +84,8 @@ type Node = {
   filter?: any;
   blur?: any;
   lens?: any;
+  stylizers?: any[];
+  lookFilter?: any;
   group?: any;
   wrap?: any;
   pre?: Node;
@@ -104,6 +124,7 @@ type Surface = {
   alpha: number;
 };
 export class SceneRenderer {
+  private effectTime = 0;
   app: any;
   host: HTMLElement;
   nodes = new Map<string, Node>();
@@ -121,6 +142,7 @@ export class SceneRenderer {
   onOverlay?: (frame: OverlayFrame) => void;
   overlayKey = "";
   dark = false;
+  private guideAccent = 0x1b1b1b;
   checkerCanvas: HTMLCanvasElement;
   revision = 0;
   lastScene?: Scene;
@@ -182,7 +204,7 @@ export class SceneRenderer {
     const ctx = c.getContext("2d")!;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, 20, 20);
-    ctx.fillStyle = "#eeeaf1";
+    ctx.fillStyle = "#e4e4e4";
     ctx.fillRect(0, 0, 10, 10);
     ctx.fillRect(10, 10, 10, 10);
     this.checker = new P.TilingSprite(P.Texture.from(c), 1, 1);
@@ -234,13 +256,17 @@ export class SceneRenderer {
       ] / 255
     );
   }
-  setDark(dark: boolean) {
+  setAppearance(dark: boolean, accent: number) {
+    if (Number.isFinite(accent) && this.guideAccent !== accent) {
+      this.guideAccent = accent;
+      this.invalidate();
+    }
     if (this.dark === dark) return;
     this.dark = dark;
     const ctx = this.checkerCanvas.getContext("2d")!;
-    ctx.fillStyle = dark ? "#37323f" : "#ffffff";
+    ctx.fillStyle = dark ? "#2a2a2a" : "#ffffff";
     ctx.fillRect(0, 0, 20, 20);
-    ctx.fillStyle = dark ? "#2c2733" : "#eeeaf1";
+    ctx.fillStyle = dark ? "#202020" : "#e4e4e4";
     ctx.fillRect(0, 0, 10, 10);
     ctx.fillRect(10, 10, 10, 10);
     this.checker.texture.baseTexture.update();
@@ -364,13 +390,17 @@ export class SceneRenderer {
         n.mirrorDepth?.depthRT?.destroy(true);
         for (const piece of n.mirrorDepth?.depthMeshes || [])
           piece?.mesh.destroy();
-        n.text?.destroy();
+        if (n.textEchoes) for (const echo of n.textEchoes) echo.destroy();
+        n.textGroup?.destroy({ children: true });
         n.filter?.destroy();
         n.blur?.destroy();
         n.lens?.destroy();
+        for (const filter of n.stylizers ?? []) filter.destroy();
         n.pre?.filter?.destroy();
         n.pre?.blur?.destroy();
         n.pre?.lens?.destroy();
+        n.pre?.lookFilter?.destroy();
+        for (const filter of n.pre?.stylizers ?? []) filter.destroy();
         n.gizmoText?.destroy();
         this.nodes.delete(id);
       }
@@ -557,6 +587,23 @@ export class SceneRenderer {
       });
       filters.push(n.lens);
     }
+    const recipe = checkedRecipe(e.stylize);
+    const mix = Math.min(1, Math.max(0, (Number.isFinite(e.stylizeMix) ? e.stylizeMix! : 1) * strength));
+    if (recipe && mix > 0) {
+      n.stylizers ??= [];
+      recipe.passes.forEach((pass, i) => {
+        if (pass.amount === 0) return;
+        const filter = n.stylizers![i] ??= new P.Filter(undefined, stylizeFragment, {});
+        const matrix = pass.matrix ?? [1, 0, 0, 0, 1, 0, 0, 0, 1];
+        Object.assign(filter.uniforms, {
+          mode: shaderOpIndex(pass.op), mixAmount: pass.amount * mix,
+          pixelScale: scale, effectScale: pass.scale, frameTime: this.effectTime,
+          darkColor: rgb(pass.dark), lightColor: rgb(pass.light),
+          rowR: matrix.slice(0, 3), rowG: matrix.slice(3, 6), rowB: matrix.slice(6), bias: pass.bias ?? [0, 0, 0],
+        });
+        filters.push(filter);
+      });
+    }
     return filters.length ? filters : null;
   }
   poseModel(
@@ -613,7 +660,8 @@ export class SceneRenderer {
       resource?.preprocess?.enabled === false
         ? neutralPreprocess
         : resource?.preprocess?.effects || neutralPreprocess;
-    const preChanged = n.preprocess !== preprocessing;
+    const look = resource?.preprocess?.enabled === false ? undefined : resource?.preprocess?.look;
+    const preChanged = n.preprocess !== resource?.preprocess;
     if (resized) {
       n.rt?.destroy(true);
       n.rt = window.PIXI.RenderTexture.create({
@@ -637,10 +685,25 @@ export class SceneRenderer {
       r.model.position.set(w / 2, h / 2);
       r.model.rotation = 0;
       n.pre = n.pre || { mesh: null };
-      r.stage.filters = this.effects(n.pre, preprocessing, 1, factor);
+      const preFilters = this.effects(n.pre, preprocessing, 1, factor) ?? [];
+      if (look) {
+        const safe = { ...neutralLook };
+        for (const id of Object.keys(safe) as (keyof typeof safe)[]) {
+          if (Number.isFinite(look[id])) {
+            const [min, max] = id === "exposure" ? [-2, 2] : [0, 1];
+            safe[id] = Math.max(min, Math.min(max, look[id]));
+          }
+        }
+        if (Object.values(safe).some(v => v !== 0)) {
+          n.pre.lookFilter ??= new window.PIXI.Filter(undefined, lookFragment, {});
+          Object.assign(n.pre.lookFilter.uniforms, safe, { pixelScale: factor });
+          preFilters.unshift(n.pre.lookFilter);
+        }
+      }
+      r.stage.filters = preFilters.length ? preFilters : null;
       r.stage.filterArea = new window.PIXI.Rectangle(0, 0, w, h);
       this.app.renderer.render(r.stage, { renderTexture: n.rt, clear: true });
-      n.preprocess = preprocessing;
+      n.preprocess = resource?.preprocess;
     }
     return n.rt;
   }
@@ -650,7 +713,12 @@ export class SceneRenderer {
       style = l.text!,
       key = JSON.stringify([value, style, l.width, l.height]);
     if (n.textKey !== key) {
-      if (!n.text) n.text = new P.Text("", {});
+      if (!n.text) {
+        n.text = new P.Text("", {});
+        n.text.anchor.set(.5);
+        n.textGroup = new P.Container();
+        n.textGroup.addChild(n.text);
+      }
       n.text.text = value;
       n.text.style = new P.TextStyle({
         fontFamily: style.fontFamily,
@@ -673,17 +741,56 @@ export class SceneRenderer {
           resolution: 1,
         });
       }
-      n.text.position.set(
-        style.align === "center"
-          ? (l.width - n.text.width) / 2
-          : style.align === "right"
-            ? l.width - n.text.width - 10
-            : 10,
-        Math.max(0, (l.height - n.text.height) / 2),
-      );
-      this.app.renderer.render(n.text, { renderTexture: n.rt, clear: true });
       n.textKey = key;
+      n.textFrame = undefined;
     }
+    const clip = visualClip(s, l.id, t);
+    const pose = titlePose(
+      style.animation, style.exit, localLayerTime(s, l, t),
+      clip ? (clip.start + clip.duration - t) * Math.abs(clip.speed) : Infinity,
+      style.fontSize, style.entranceDuration, style.exitDuration, style.motionAmount,
+    );
+    const frame = JSON.stringify(pose);
+    if (n.textFrame === frame) return n.rt;
+    n.textFrame = frame;
+    n.text.scale.set(1);
+    const w = n.text.width, h = n.text.height;
+    const x = style.align === "center" ? l.width / 2 : style.align === "right" ? l.width - w / 2 - 10 : w / 2 + 10;
+    const y = Math.max(0, (l.height - h) / 2) + h / 2;
+    n.text.position.set(x + pose.x, y + pose.y);
+    n.text.scale.set(pose.scale);
+    n.text.rotation = pose.angle;
+    n.text.alpha = pose.alpha;
+    if (pose.reveal < 1) {
+      if (!n.textMask) {
+        n.textMask = new P.Graphics();
+        n.textGroup.addChild(n.textMask);
+      }
+      n.textMask.clear().beginFill(0xffffff)
+        .drawRect(x - w / 2, 0, Math.max(0.001, w * pose.reveal), l.height).endFill();
+      n.text.mask = n.textMask;
+    } else if (n.textMask) {
+      n.text.mask = null;
+      n.textMask.clear();
+    }
+    if (pose.echo > .05 && !n.textEchoes) {
+      n.textEchoes = [0xff456c, 0x30e6ff].map(tint => {
+        const sprite = new P.Sprite(n.text.texture);
+        sprite.anchor.set(.5);
+        sprite.tint = tint;
+        n.textGroup.addChildAt(sprite, 0);
+        return sprite;
+      });
+    }
+    n.textEchoes?.forEach((echo, i) => {
+      echo.visible = pose.echo > .05;
+      echo.position.set(n.text.x + (i ? 1 : -1) * pose.echo, n.text.y);
+      echo.scale.set(pose.scale);
+      echo.rotation = pose.angle;
+      echo.alpha = Math.min(.58, pose.echo / 16) * pose.alpha;
+      echo.mask = n.text.mask;
+    });
+    this.app.renderer.render(n.textGroup, { renderTexture: n.rt, clear: true });
     return n.rt;
   }
   renderAt(s: Scene, t: number, exact = false) {
@@ -694,6 +801,7 @@ export class SceneRenderer {
     const orbit =
       !exact && s.id !== "@preprocessing" ? this.viewportOrbit : undefined;
     this.exactFrame = exact;
+    this.effectTime = t;
     const P = window.PIXI;
     let w: number, h: number, scale: number, cx: number, cy: number;
     if (exact) {
@@ -779,7 +887,7 @@ export class SceneRenderer {
       const floor = s.height / 2;
       this.grid.lineStyle(
         1,
-        this.dark ? 0x777087 : 0x9485aa,
+        this.dark ? 0x707070 : 0xa0a0a0,
         this.dark ? 0.4 : 0.31,
       );
       for (let i = -extent; i <= extent; i += step) {
@@ -1067,7 +1175,7 @@ export class SceneRenderer {
     if (!exact) {
       if (!orbit)
         this.guides
-          .lineStyle(1, 0x847294, 0.8)
+          .lineStyle(1, this.dark ? 0x999999 : 0x707070, 0.8)
           .drawRect(this.frame.x, this.frame.y, this.frame.w, this.frame.h);
       else if (this.showCamera) {
         const eye = outputProjection(camera).origin;
@@ -1079,7 +1187,7 @@ export class SceneRenderer {
           [hw, hh],
           [-hw, hh],
         ].map(([x, y]) => [x + camera.x, y + camera.y, camera.z]);
-        this.guides.lineStyle(1, 0x9373c7, 0.65);
+        this.guides.lineStyle(1, this.guideAccent, 0.65);
         for (let i = 0; i < 4; i++) {
           line(this.guides, frame[i], frame[(i + 1) % 4]);
           line(this.guides, eye, frame[i]);
@@ -1088,7 +1196,7 @@ export class SceneRenderer {
         if (p[2] >= NEAR) {
           const q = onScreen(p);
           this.guides
-            .beginFill(0x7156a0, 0.9)
+            .beginFill(this.guideAccent, 0.9)
             .drawRoundedRect(q.x - 11, q.y - 7, 22, 14, 3)
             .endFill();
           this.hits.push({
@@ -1104,8 +1212,9 @@ export class SceneRenderer {
         }
       }
       for (const light of lights) {
-        const l = s.layers.find((l) => l.id === light.id)!,
-          n = this.nodes.get(l.id)!;
+        const l = s.layers.find((l) => l.id === light.id),
+          n = this.nodes.get(light.id);
+        if (!l || !n) continue;
         const point = at(matrixFor(l));
         if (!point) continue;
         const x = point.x,
@@ -1114,7 +1223,7 @@ export class SceneRenderer {
         const color = parseInt(light.config.color.slice(1), 16);
         this.guides
           .lineStyle(1.5, color, 0.95)
-          .beginFill(0x5e4677, 0.85)
+          .beginFill(this.dark ? 0x3c3c3c : 0x565656, 0.85)
           .drawCircle(x, y, r)
           .endFill();
         for (let i = 0; i < 8; i++) {
@@ -1148,12 +1257,12 @@ export class SceneRenderer {
           n.gizmoText = new P.Text("", {
             fontFamily: "Microsoft YaHei",
             fontSize: 11,
-            fill: this.dark ? 0xe5d9f5 : 0x675070,
+            fill: this.dark ? 0xf0f0f0 : 0x4b4b4b,
           });
           this.guides.addChild(n.gizmoText);
         }
         n.gizmoText.visible = true;
-        n.gizmoText.style.fill = this.dark ? 0xe5d9f5 : 0x675070;
+        n.gizmoText.style.fill = this.dark ? 0xf0f0f0 : 0x4b4b4b;
         n.gizmoText.text = l.name;
         n.gizmoText.position.set(x + 20, y - 8);
         this.hits.push({
@@ -1171,7 +1280,7 @@ export class SceneRenderer {
       const hit = this.hits.find((h) => h.id === this.selected);
       for (const h of this.hits.filter((h) => ids.includes(h.id))) {
         this.guides
-          .lineStyle(1.5, 0x8755cc, 1)
+          .lineStyle(1.5, this.guideAccent, 1)
           .drawPolygon(h.points.flatMap((p) => [p.x, p.y]));
       }
       if (this.onOverlay) {

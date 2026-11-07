@@ -114,7 +114,7 @@ export function readProperty(s: Scene, b: Binding, t: number) {
       keys = l.animation[b.channel] || [];
       base = b.channel.startsWith("effects.")
         ? ((l.effects as any)[b.channel.slice(8)] ??
-          (b.channel === "effects.bokeh" ? 0.25 : 0))
+          (b.channel === "effects.bokeh" ? 0.25 : b.channel === "effects.stylizeMix" ? 1 : 0))
         : b.channel.startsWith("light.")
           ? ((l.light as any)?.[b.channel.slice(6)] ?? 0)
           : b.channel.startsWith("surface.")
@@ -249,6 +249,8 @@ export function propertiesOf(
         );
       }
   }
+  if (l.effects.stylize)
+    add("effects.stylizeMix", "风格强度", "效果", l.effects.stylizeMix ?? 1, 0, 1);
   if (l.light)
     for (const [id, name, min, max] of [
       ["intensity", "强度", 0, 8],

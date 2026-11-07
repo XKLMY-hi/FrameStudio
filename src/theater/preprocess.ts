@@ -1,5 +1,5 @@
 import { Scene, emptyScene, layer, addVisual } from "./schema";
-export function preprocessingScene(source: Scene, resourceId: string): Scene {
+export function preprocessingScene(source: Scene, resourceId: string, original = false): Scene {
   const preview = emptyScene();
   preview.id = "@preprocessing";
   preview.name = "模型预处理";
@@ -7,7 +7,9 @@ export function preprocessingScene(source: Scene, resourceId: string): Scene {
   preview.duration = 1;
   preview.fps = 30;
   preview.workArea = { start: 0, end: 1, loop: false };
-  preview.models = source.models;
+  preview.models = original ? source.models.map((r) =>
+    r.id === resourceId ? { ...r, preprocess: undefined } : r
+  ) : source.models;
   preview.assets = source.assets;
   preview.lighting = {
     enabled: false,

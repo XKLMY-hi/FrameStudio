@@ -53,27 +53,27 @@ export function AudioEditor({
           d={points
             .map((v, i) => `M${(i * w) / 349} ${65 - v * 43}v${v * 86}`)
             .join("")}
-          stroke="#5d9d82"
+          stroke="var(--ink-muted)"
           strokeWidth="1.3"
         />
         <path
           d={`M0 110 L${(clip.fadeIn / clip.duration) * w} 20 L${(1 - clip.fadeOut / clip.duration) * w} 20 L${w} 110`}
           fill="none"
-          stroke="#6750a4"
+          stroke="var(--primary)"
           strokeWidth="2"
         />
         <circle
           cx={(clip.fadeIn / clip.duration) * w}
           cy="20"
           r="7"
-          fill="#6750a4"
+          fill="var(--primary)"
           onPointerDown={(e) => drag(e, "in")}
         />
         <circle
           cx={(1 - clip.fadeOut / clip.duration) * w}
           cy="20"
           r="7"
-          fill="#6750a4"
+          fill="var(--primary)"
           onPointerDown={(e) => drag(e, "out")}
         />
         <text x="4" y="122">

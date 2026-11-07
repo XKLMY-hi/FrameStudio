@@ -25,6 +25,7 @@ import {
   Unlock,
   ChevronDown,
   Copy,
+  ClipboardPaste,
   Trash2,
   X,
   Play,
@@ -44,6 +45,12 @@ import {
   Lamp,
   Grid2X2,
   Minimize2,
+  Clapperboard,
+  FilePlus2,
+  ArrowUpRight,
+  Minus,
+  ListTree,
+  SquareDashed,
 } from "lucide-react";
 import { api, download, media, token } from "../api";
 import {
@@ -59,9 +66,11 @@ import { clamp, classify, parseAsset, parseLegacy } from "../engine";
 import { CurveWorkspace } from "./CurveWorkspace";
 import { LightPanel } from "./LightPanel";
 import { ModelPreprocessPanel } from "./ModelPreprocessPanel";
+import { ShaderControls } from "./ShaderControls";
+import { defaultTitleAmount, defaultTitleDuration, isTitleMotion, titleMotions, type TextAnimation, type TitleMotion } from "./text-motion";
 import { preprocessingScene } from "./preprocess";
 import { receivesLight } from "./lighting";
-import { SceneTimeline } from "./SceneTimeline";
+import { SceneTimeline, formatTimecode } from "./SceneTimeline";
 import {
   Binding,
   readProperty,
@@ -89,6 +98,7 @@ import {
   type OverlayFrame,
 } from "./ViewportOverlay";
 import { AuditionControls } from "./AuditionControls";
+import { AppearanceMenu, normalizePreferences, type Preferences } from "./AppearanceMenu";
 import {
   advanceAudition,
   auditionProject,
@@ -136,6 +146,9 @@ import {
   collectAudio,
   cloneData,
   duplicateTree,
+  copyLayerTrees,
+  pasteLayerTrees,
+  type LayerClipboard,
   enabledTracks,
   layerAlpha,
   modelValues,
@@ -272,13 +285,11 @@ export default function TheaterApp() {
     [time, setTime] = useState(0),
     [playing, setPlaying] = useState(false),
     [libraryTab, setLibraryTab] = useState("model"),
-    [managerTab, setManagerTab] = useState<"layers" | "assets">("layers"),
+    [managerTab, setManagerTab] = useState<"layers" | "assets" | "tree">("layers"),
     [foldedGroups, setFoldedGroups] = useState<Record<string, boolean>>({}),
     [gizmoTool, setGizmoTool] = useState<GizmoTool>("move"),
-    [appearance, setAppearance] = useState(() => {
-      const value = localStorage.getItem("framestudio.appearance");
-      return value === "light" || value === "dark" ? value : "system";
-    }),
+    [preferences, setPreferences] = useState(() => normalizePreferences()),
+    [preferencesReady, setPreferencesReady] = useState(false),
     [search, setSearch] = useState(""),
     [modelEntries, setModelEntries] = useState<ModelEntry[]>([]),
     [inspector, setInspector] = useState<
@@ -316,9 +327,12 @@ export default function TheaterApp() {
     [workspaceMode, setWorkspaceMode] = useState<"scene" | "preprocess">(
       "scene",
     ),
-    [preprocessId, setPreprocessId] = useState("");
+    [preprocessId, setPreprocessId] = useState(""),
+    [preprocessOriginal, setPreprocessOriginal] = useState(false);
   const overlay = useMemo(viewportStore, []),
     mirrorOverlay = useMemo(viewportStore, []);
+  const preferenceWrite = useRef(Promise.resolve());
+  const { appearance, accent } = preferences;
   const host = useRef<HTMLDivElement>(null),
     menuRef = useRef<HTMLDivElement>(null),
     mirrorHost = useRef<HTMLDivElement>(null),
@@ -353,7 +367,11 @@ export default function TheaterApp() {
     audioInput = useRef<HTMLInputElement>(null),
     motionInput = useRef<HTMLInputElement>(null),
     projectInput = useRef<HTMLInputElement>(null),
-    clipboard = useRef<SceneClip[]>([]),
+    clipboard = useRef<
+      | { kind: "objects"; snapshot: LayerClipboard }
+      | { kind: "clips"; sceneId: string; clips: SceneClip[] }
+      | null
+    >(null),
     motionPreviewRef = useRef<AuditionState | undefined>(undefined),
     auditionLast = useRef(0);
   sRef.current = scene;
@@ -406,11 +424,11 @@ export default function TheaterApp() {
     () =>
       workspaceMode === "preprocess"
         ? freeze(
-            preprocessingScene(scene, preprocessingResource?.id || ""),
+            preprocessingScene(scene, preprocessingResource?.id || "", preprocessOriginal),
             true,
           )
         : scene,
-    [scene, workspaceMode, preprocessingResource?.id],
+    [scene, workspaceMode, preprocessingResource?.id, preprocessOriginal],
   );
   displayRef.current = displayScene;
   modeRef.current = workspaceMode;
@@ -423,6 +441,12 @@ export default function TheaterApp() {
     setToast(s);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 4200);
+  }
+  function updatePreferences(next: Preferences) {
+    setPreferences(next);
+    preferenceWrite.current = preferenceWrite.current
+      .then(() => api("preferences", next))
+      .catch(() => notify("外观设置未保存"));
   }
   function change(mut: Scene | ((s: Scene) => void), record = true) {
     stopMotionPreview();
@@ -667,12 +691,14 @@ export default function TheaterApp() {
       try {
         const info = await api("info");
         if (!live) return;
-        api("preferences")
-          .then(({ appearance }) => {
-            if (live && ["system", "light", "dark"].includes(appearance))
-              setAppearance(appearance);
+        api<Partial<Preferences>>("preferences")
+          .then((value) => {
+            if (live) setPreferences(normalizePreferences(value));
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            if (live) setPreferencesReady(true);
+          });
         setModelEntries(info.models);
         const saved = await api<Scene | null>("scene-autosave");
         if (saved) {
@@ -713,15 +739,19 @@ export default function TheaterApp() {
     const apply = () => {
       const dark =
         appearance === "dark" || (appearance === "system" && query.matches);
-      document.documentElement.dataset.theme = dark ? "dark" : "light";
-      rRef.current?.setDark(dark);
+      const root = document.documentElement;
+      root.dataset.theme = dark ? "dark" : "light";
+      root.dataset.accent = accent;
+      const primary = getComputedStyle(root).getPropertyValue(
+        dark ? "--dark-primary" : "--light-primary",
+      ).trim();
+      rRef.current?.setAppearance(dark, Number.parseInt(primary.slice(1), 16));
     };
-    localStorage.setItem("framestudio.appearance", appearance);
     window.studioDesktop?.setAppearance?.(appearance);
     apply();
     query.addEventListener("change", apply);
     return () => query.removeEventListener("change", apply);
-  }, [appearance]);
+  }, [appearance, accent]);
   useEffect(() => {
     rRef.current
       ?.ensure(displayScene)
@@ -767,7 +797,8 @@ export default function TheaterApp() {
       paint = 0,
       ui = 0,
       audio = 0,
-      clock = -1;
+      clock = -1,
+      clockRate = 0;
     function tick(now: number) {
       const dt = Math.min(0.15, (now - last) / 1000);
       last = now;
@@ -842,16 +873,23 @@ export default function TheaterApp() {
         }
         paint = now;
       }
-      if (t !== clock) {
+      if (t !== clock || p.fps !== clockRate) {
         const c = document.querySelector<HTMLElement>(".scene-nowclock");
-        if (c) c.textContent = t.toFixed(3) + "s";
+        const frame = Math.round(t * p.fps);
+        if (c) {
+          c.textContent = formatTimecode(frame, p.fps);
+          c.title = t.toFixed(3) + " 秒";
+        }
+        const frameLabel = document.querySelector("[data-now-frame]");
+        if (frameLabel) frameLabel.textContent = String(frame);
         const h = document.querySelector<HTMLElement>(".scene-playhead");
         if (h)
           h.style.left =
-            Number(h.dataset.label || 340) +
+            Number(h.dataset.label) +
             t * Number(h.dataset.zoom || 70) +
             "px";
         clock = t;
+        clockRate = p.fps;
       }
       if (playRef.current && now - audio > 70) {
         syncRef.current();
@@ -993,6 +1031,7 @@ export default function TheaterApp() {
     });
   }
   function openPreprocess(id = resource?.id || scene.models[0]?.id || "") {
+    setPreprocessOriginal(false);
     stopMotionPreview();
     setPlaying(false);
     playRef.current = false;
@@ -1095,6 +1134,54 @@ export default function TheaterApp() {
       id = duplicateTree(s, selectedLayer.id);
     });
     selectLayer(id);
+  }
+  function copyObjects(ids = selectedIds) {
+    const snapshot = copyLayerTrees(sRef.current, ids, tRef.current);
+    if (!snapshot.roots.length) return false;
+    clipboard.current = { kind: "objects", snapshot };
+    notify(`已复制 ${snapshot.roots.length} 个对象`);
+    return true;
+  }
+  function copySelection() {
+    if (!selection.length) return copyObjects();
+    const s = sRef.current;
+    const clips = s.tracks.flatMap(t => t.clips)
+      .filter(c => selection.includes(c.id)).map(cloneData);
+    if (!clips.length) return false;
+    clipboard.current = { kind: "clips", sceneId: s.id, clips };
+    notify(`已复制 ${clips.length} 个片段`);
+    return true;
+  }
+  function canPaste(objectsOnly = false) {
+    const saved = clipboard.current;
+    return saved?.kind === "objects"
+      ? saved.snapshot.sceneId === sRef.current.id
+      : !objectsOnly && saved?.kind === "clips" && saved.sceneId === sRef.current.id;
+  }
+  function pasteSelection(objectsOnly = false) {
+    const saved = clipboard.current;
+    if (!saved || !canPaste(objectsOnly)) return false;
+    if (saved.kind === "objects") {
+      let ids: string[] = [];
+      change(s => { ids = pasteLayerTrees(s, saved.snapshot); });
+      selectObjects(ids);
+      notify(`已原地粘贴 ${ids.length} 个对象`);
+      return true;
+    }
+    const at = tRef.current, start = Math.min(...saved.clips.map(c => c.start));
+    const clips = saved.clips.filter(c => sRef.current.layers.some(l => l.id === c.layerId));
+    if (!clips.length) return false;
+    const ids: string[] = [];
+    change(s => {
+      for (const c of clips) {
+        const id = uid();
+        addClipToTrack(s, { ...cloneData(c), id, start: at + c.start - start });
+        ids.push(id);
+      }
+    });
+    selectClips(ids);
+    notify(`已在播放头粘贴 ${ids.length} 个片段`);
+    return true;
   }
   function deleteLayer(
     targets = selectedIds.length ? selectedIds : [selected],
@@ -1854,6 +1941,22 @@ export default function TheaterApp() {
     setSplitLayout(layout);
     rRef.current?.invalidate();
   }
+  function zoomViewport(pane: "main" | "mirror", dy: number, x = 0, y = 0) {
+    const renderer = rRef.current;
+    if (!renderer) return;
+    const { orbit, view } = paneView(pane);
+    if (orbit) {
+      putOrbit(pane, orbitZoom(orbit, dy));
+      return;
+    }
+    const old = view.zoom;
+    const next = clamp(old * Math.exp(-dy * 0.0015), 0.08, 8);
+    view.panX = x - ((x - view.panX) * next) / old;
+    view.panY = y - ((y - view.panY) * next) / old;
+    view.zoom = next;
+    if (pane === "main") setViewZoom(next);
+    renderer.invalidate();
+  }
   function resizeSplit(e: React.PointerEvent) {
     e.preventDefault();
     const rect = e.currentTarget.parentElement!.getBoundingClientRect();
@@ -2088,27 +2191,13 @@ export default function TheaterApp() {
     const listen = (el: HTMLDivElement, pane: "main" | "mirror") => {
       const wheel = (e: WheelEvent) => {
         e.preventDefault();
-        const r = rRef.current;
-        if (!r) return;
-        const state = paneView(pane),
-          dy =
-            e.deltaY *
-            (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1);
-        if (state.orbit) {
-          putOrbit(pane, orbitZoom(state.orbit, dy));
-          return;
-        }
-        const rect = el.getBoundingClientRect(),
-          view = state.view,
-          old = view.zoom,
-          next = clamp(old * Math.exp(-dy * 0.0015), 0.08, 8);
-        const x = e.clientX - rect.left - rect.width / 2,
-          y = e.clientY - rect.top - rect.height / 2;
-        view.panX = x - ((x - view.panX) * next) / old;
-        view.panY = y - ((y - view.panY) * next) / old;
-        view.zoom = next;
-        if (pane === "main") setViewZoom(next);
-        r.invalidate();
+        const rect = el.getBoundingClientRect();
+        zoomViewport(
+          pane,
+          e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1),
+          e.clientX - rect.left - rect.width / 2,
+          e.clientY - rect.top - rect.height / 2,
+        );
       };
       const resize = new ResizeObserver(() => rRef.current?.invalidate());
       resize.observe(el);
@@ -2138,8 +2227,9 @@ export default function TheaterApp() {
   }, [contextMenu]);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (document.getElementById("appearance-menu")?.matches(":popover-open")) return;
       const target = e.target as HTMLElement,
-        editing = ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+        editing = target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
       if (e.key === "Escape") {
         if (contextMenu) {
           setContextMenu(undefined);
@@ -2153,9 +2243,15 @@ export default function TheaterApp() {
           stopMotionPreview();
           return;
         }
-        if (!busy) setModal("");
-        setCurveOpen(false);
-        if (modeRef.current === "preprocess" && !modal)
+        if (modal) {
+          if (!busy) setModal("");
+          return;
+        }
+        if (curveOpen) {
+          setCurveOpen(false);
+          return;
+        }
+        if (modeRef.current === "preprocess")
           setWorkspaceMode("scene");
         else setInspectorOpen(false);
         return;
@@ -2235,22 +2331,10 @@ export default function TheaterApp() {
         e.preventDefault();
         saveProject();
       }
-      if (e.ctrlKey && e.key === "c")
-        clipboard.current = structuredClone(
-          scene.tracks
-            .flatMap((t) => t.clips)
-            .filter((c) => selection.includes(c.id)),
-        );
-      if (e.ctrlKey && e.key === "v" && clipboard.current.length) {
-        const min = Math.min(...clipboard.current.map((c) => c.start));
-        change((s) => {
-          for (const c of clipboard.current)
-            addClipToTrack(s, {
-              ...cloneData(c),
-              id: uid(),
-              start: tRef.current + c.start - min,
-            });
-        });
+      if ((e.ctrlKey || e.metaKey) && !e.repeat) {
+        const key = e.key.toLowerCase();
+        if (key === "c" ? copySelection() : key === "v" && pasteSelection())
+          e.preventDefault();
       }
     };
     const up = (e: KeyboardEvent) => {
@@ -2271,6 +2355,7 @@ export default function TheaterApp() {
     busy,
     expandedView,
     contextMenu,
+    curveOpen,
   ]);
   useEffect(() => {
     window.theater = {
@@ -2334,18 +2419,34 @@ export default function TheaterApp() {
     motions = (motionResource?.assets || []).filter((a) =>
       a.name.toLowerCase().includes(search.toLowerCase()),
     );
-  const layerRows: { l: Layer; depth: number }[] = [];
-  function rows(parent: string | null, depth = 0, seen = new Set<string>()) {
-    for (const l of [...scene.layers]
-      .reverse()
-      .filter((l) => l.parentId === parent)) {
-      if (seen.has(l.id)) continue;
-      layerRows.push({ l, depth });
-      if (l.kind === "group" && !foldedGroups[l.id])
-        rows(l.id, depth + 1, new Set([...seen, l.id]));
+  const layerRows = useMemo(() => {
+    const result: { l: Layer; depth: number }[] = [];
+    const children = new Map<string | null, Layer[]>();
+    const visited = new Set<string>();
+    for (const l of [...scene.layers].reverse()) {
+      if (!children.has(l.parentId)) children.set(l.parentId, []);
+      children.get(l.parentId)!.push(l);
     }
-  }
-  rows(null);
+    function visit(parent: string | null, depth = 0) {
+      for (const l of children.get(parent) ?? []) {
+        if (visited.has(l.id)) continue;
+        visited.add(l.id);
+        result.push({ l, depth });
+        if (l.kind === "group" && !foldedGroups[l.id]) visit(l.id, depth + 1);
+      }
+    }
+    visit(null);
+    return result;
+  }, [scene.layers, foldedGroups]);
+  const sceneActions = useMemo(() => {
+    const result = new Map<string, SceneClip[]>();
+    for (const track of scene.tracks) for (const clip of track.clips) {
+      if (clip.kind === "visual") continue;
+      if (!result.has(clip.layerId)) result.set(clip.layerId, []);
+      result.get(clip.layerId)!.push(clip);
+    }
+    return result;
+  }, [scene.tracks]);
   const paramMatches = params.filter(
       (p) =>
         p.id.toLowerCase().includes(paramSearch.toLowerCase()) ||
@@ -2363,48 +2464,36 @@ export default function TheaterApp() {
   ] as const;
   return (
     <div
-      className="theater-app"
+      className={"theater-app" + (curveOpen && workspaceMode === "scene" ? " curves-open" : "")}
       style={{
         gridTemplateRows:
-          "64px minmax(180px,1fr) " +
-          (workspaceMode === "preprocess" ? 0 : timelineHeight) +
-          "px 25px",
+          "var(--header-height) minmax(180px,1fr) " +
+          (workspaceMode === "preprocess"
+            ? "0px"
+            : `clamp(210px, ${timelineHeight + (curveOpen ? 95 : 0)}px, ${curveOpen ? 62 : 47}vh)`) +
+          " 20px",
       }}
     >
       <header className="theater-header">
         <div className="theater-brand">
           <span>
-            <Layers size={23} />
+            <Clapperboard size={20} />
           </span>
-          <strong>FrameStudio</strong>
+          <label className="scene-name">
+            <small>FrameStudio · .livemg{dirty && <i title="草稿已更改" />}</small>
+            <input
+              className="scene-title"
+              aria-label="工程名称"
+              value={scene.name}
+              onChange={(e) => change((s) => { s.name = e.target.value; })}
+            />
+          </label>
         </div>
-        <input
-          className="scene-title"
-          aria-label="工程名称"
-          value={scene.name}
-          onChange={(e) =>
-            change((s) => {
-              s.name = e.target.value;
-            })
-          }
-        />
+        <div className="scene-metadata" aria-label="工程规格">
+          {scene.duration.toFixed(1)} s <span>·</span> {scene.fps} fps <span>·</span> {scene.width} × {scene.height}
+        </div>
         <div className="header-actions">
-          <select
-            className="appearance-select"
-            aria-label="外观"
-            value={appearance}
-            onChange={(e) => {
-              const next = e.target.value;
-              setAppearance(next);
-              api("preferences", { appearance: next }).catch(() =>
-                notify("外观设置未保存"),
-              );
-            }}
-          >
-            <option value="system">跟随系统</option>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
-          </select>
+          <div className="action-group" aria-label="工程文件">
           <button
             title="新建工程"
             onClick={() => {
@@ -2416,7 +2505,7 @@ export default function TheaterApp() {
               loadScene(emptyScene());
             }}
           >
-            新建
+            <FilePlus2 size={17} />
           </button>
           <button
             title="打开 .livemg 工程"
@@ -2427,6 +2516,8 @@ export default function TheaterApp() {
           <button title="保存 .livemg（Ctrl+S）" onClick={saveProject}>
             <Save size={17} />
           </button>
+          </div>
+          <div className="action-group" aria-label="编辑历史">
           <button
             title="撤销"
             disabled={!history.current.length}
@@ -2437,17 +2528,23 @@ export default function TheaterApp() {
           <button title="重做" disabled={!future.current.length} onClick={redo}>
             <Redo2 size={17} />
           </button>
-          <button onClick={() => setModal("canvas")}>
+          </div>
+          <button className="header-tool" title="画布与时间设置" onClick={() => setModal("canvas")}>
             <Settings2 size={16} />
-            画布
+            <span>画布</span>
           </button>
+          <AppearanceMenu
+            preferences={preferences}
+            onChange={updatePreferences}
+            ready={preferencesReady}
+          />
           <button
             className="export-button"
             disabled={!ready}
             onClick={() => setModal("export")}
           >
-            <Upload size={16} />
-            导出
+            <ArrowUpRight size={17} />
+            导出成片
           </button>
         </div>
       </header>
@@ -2499,7 +2596,19 @@ export default function TheaterApp() {
           className="theater-library"
           hidden={workspaceMode === "preprocess"}
         >
+          <div className="workspace-panel-heading">
+            <strong>素材与层级</strong>
+            <small>{scene.layers.length} 个图层</small>
+          </div>
           <nav className="manager-tabs" aria-label="场景管理">
+            <button
+              className={managerTab === "assets" ? "active" : ""}
+              aria-pressed={managerTab === "assets"}
+              onClick={() => setManagerTab("assets")}
+            >
+              <FolderOpen size={14} />
+              素材
+            </button>
             <button
               className={managerTab === "layers" ? "active" : ""}
               aria-pressed={managerTab === "layers"}
@@ -2509,12 +2618,12 @@ export default function TheaterApp() {
               图层
             </button>
             <button
-              className={managerTab === "assets" ? "active" : ""}
-              aria-pressed={managerTab === "assets"}
-              onClick={() => setManagerTab("assets")}
+              className={managerTab === "tree" ? "active" : ""}
+              aria-pressed={managerTab === "tree"}
+              onClick={() => setManagerTab("tree")}
             >
-              <FolderOpen size={15} />
-              资产
+              <ListTree size={14} />
+              场景树
             </button>
           </nav>
           <nav hidden={managerTab !== "assets"}>
@@ -2796,11 +2905,11 @@ export default function TheaterApp() {
               </button>
             )}
           </div>
-          <div className="layer-manager" hidden={managerTab !== "layers"}>
+          <div className="layer-manager" hidden={managerTab === "assets"}>
             <div className="layer-title">
               <strong>
                 <FolderOpen size={14} />
-                场景集合
+                {managerTab === "tree" ? "场景集合" : "图层顺序"}
               </strong>
               <button
                 className={scene.depthOcclusion !== false ? "active" : ""}
@@ -2874,12 +2983,13 @@ export default function TheaterApp() {
                 成片相机
               </button>
               {layerRows.map(({ l, depth }) => (
+                <React.Fragment key={l.id}>
                 <div
                   className={
                     "layer-row " +
                     (selectedIds.includes(l.id) ? "selected" : "")
                   }
-                  key={l.id}
+                  data-layer-kind={l.kind}
                   style={{ paddingLeft: 9 + depth * 14 }}
                   draggable
                   onDragStart={(e) =>
@@ -2908,11 +3018,17 @@ export default function TheaterApp() {
                     else selectLayer(l.id);
                     setSelection([]);
                   }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    const ids = selectedIds.includes(l.id) ? selectedIds : [l.id];
+                    if (!selectedIds.includes(l.id)) selectLayer(l.id);
+                    setContextMenu({ x: e.clientX, y: e.clientY, ids });
+                  }}
                 >
-                  {l.kind === "group" && (
+                  {(l.kind === "group" || (managerTab === "tree" && sceneActions.has(l.id))) && (
                     <button
                       className="layer-fold"
-                      title={foldedGroups[l.id] ? "展开组" : "折叠组"}
+                      title={foldedGroups[l.id] ? "展开子项" : "折叠子项"}
                       aria-expanded={!foldedGroups[l.id]}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -2933,7 +3049,19 @@ export default function TheaterApp() {
                   <input
                     aria-label={"图层名称 " + l.id}
                     value={l.name}
+                    title="双击重命名"
+                    onMouseDown={e => {
+                      if (e.button === 0 && e.detail === 1 && document.activeElement !== e.currentTarget) {
+                        e.preventDefault();
+                        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+                      }
+                    }}
+                    onDoubleClick={e => {
+                      e.currentTarget.focus();
+                      e.currentTarget.select();
+                    }}
                     onClick={(e) => {
+                      if (e.ctrlKey || e.shiftKey) return;
                       e.stopPropagation();
                       selectLayer(l.id);
                     }}
@@ -2980,15 +3108,36 @@ export default function TheaterApp() {
                     {l.locked ? <Lock size={11} /> : <Unlock size={11} />}
                   </button>
                 </div>
+                {managerTab === "tree" && !foldedGroups[l.id] && sceneActions.get(l.id)?.map((clip) => (
+                  <button
+                    key={clip.id}
+                    className={"outliner-clip" + (selection.includes(clip.id) ? " active" : "")}
+                    style={{ paddingLeft: 24 + depth * 14 }}
+                    onClick={() => selectClips([clip.id])}
+                    title={clip.name + " · " + clip.duration.toFixed(3) + " 秒"}
+                  >
+                    {clip.kind === "motion" ? <Clapperboard size={13} /> : <Music2 size={13} />}
+                    <span>{clip.name}</span>
+                    <small>{Number(clip.duration.toFixed(3))} s</small>
+                  </button>
+                ))}
+                </React.Fragment>
               ))}
             </div>
             <div className="layer-actions">
               <button
-                title="复制独立图层"
-                onClick={duplicateLayer}
+                title="复制对象（Ctrl+C）"
+                onClick={() => copyObjects()}
                 disabled={!selectedLayer}
               >
                 <Copy size={14} />
+              </button>
+              <button
+                title="原地粘贴对象（Ctrl+V）"
+                onClick={() => pasteSelection(true)}
+                disabled={!canPaste(true)}
+              >
+                <ClipboardPaste size={14} />
               </button>
               <button
                 title="删除图层"
@@ -3134,6 +3283,14 @@ export default function TheaterApp() {
                 <option value="960">均衡</option>
                 <option value="1440">高清</option>
               </select>
+              <div className="viewport-zoom" aria-label="预览缩放">
+                <button title="缩小画布" onClick={() => zoomViewport("main", 120)}>
+                  <Minus size={15} />
+                </button>
+                <button title="放大画布" onClick={() => zoomViewport("main", -120)}>
+                  <Plus size={15} />
+                </button>
+              </div>
               {(!spatialView || workspaceMode === "preprocess") && (
                 <button
                   onClick={() => {
@@ -3179,6 +3336,7 @@ export default function TheaterApp() {
                 aria-pressed={boxTool}
                 onClick={() => setBoxTool((v) => !v)}
               >
+                <SquareDashed size={14} />
                 框选
               </button>
               {(
@@ -3371,6 +3529,12 @@ export default function TheaterApp() {
                       <option value="camera">成片</option>
                       <option value="space">三维预览</option>
                     </select>
+                    <button title="缩小第二预览" onClick={() => zoomViewport("mirror", 120)}>
+                      <Minus size={14} />
+                    </button>
+                    <button title="放大第二预览" onClick={() => zoomViewport("mirror", -120)}>
+                      <Plus size={14} />
+                    </button>
                     <button
                       title="适配第二预览"
                       onClick={() => {
@@ -3510,10 +3674,32 @@ export default function TheaterApp() {
               <X size={18} />
             </button>
           </div>
+          <div className="inspector-target">
+            <span className="inspector-target-icon">
+              {workspaceMode === "preprocess" ? <Layers size={19} /> :
+                selected === "@camera" ? <Camera size={19} /> :
+                selectedLayer ? icons[selectedLayer.kind] : <Focus size={18} />}
+            </span>
+            <div>
+              <small>{workspaceMode === "preprocess" ? "当前模型素材" : "当前编辑目标"}</small>
+              <strong title={selectedLayer?.name}>
+                {workspaceMode === "preprocess" ? preprocessingResource?.name || "选择模型" :
+                  selected === "@camera" ? "成片相机" :
+                  selectedIds.length > 1 ? `${selectedIds.length} 个对象` :
+                  selectedLayer?.name || "未选择对象"}
+              </strong>
+              {workspaceMode === "scene" && selectedClip && <small>{selectedClip.name}</small>}
+            </div>
+          </div>
           <div className="scene-properties">
             {workspaceMode === "preprocess" ? (
               <ModelPreprocessPanel
                 resource={preprocessingResource}
+                original={preprocessOriginal}
+                onCompare={setPreprocessOriginal}
+                instances={scene.layers
+                  .filter((l) => l.model && l.model.resourceId === preprocessingResource?.id)
+                  .map((l) => l.name)}
                 onChange={(value) =>
                   change((s) => {
                     const r = s.models.find(
@@ -3957,10 +4143,11 @@ export default function TheaterApp() {
                         <label className="stack-field">
                           文本动画
                           <select
+                            aria-label="文本动画"
                             value={selectedLayer.text.animation}
                             onChange={(e) =>
                               updateLayer((l) => {
-                                l.text!.animation = e.target.value as any;
+                                l.text!.animation = e.target.value as TextAnimation;
                               })
                             }
                           >
@@ -3970,9 +4157,23 @@ export default function TheaterApp() {
                             <option value="typewriter-fade">
                               打字机 + 淡入淡出
                             </option>
+                            <optgroup label="动效预设">
+                              {Object.entries(titleMotions).map(([id, label]) =>
+                                <option value={id} key={id}>{label}</option>
+                              )}
+                            </optgroup>
                           </select>
                         </label>
-                        <Num
+                        <button className="wide-button" onClick={() => {
+                          const start = sRef.current.tracks
+                            .flatMap(t => t.clips)
+                            .filter(c => c.layerId === selectedLayer.id && c.kind === "visual" && c.enabled)
+                            .reduce((first, c) => Math.min(first, c.start), Infinity);
+                          if (Number.isFinite(start)) seek(start);
+                        }}>
+                          定位文字入场
+                        </button>
+                        {selectedLayer.text.animation.includes("typewriter") && <Num
                           label="打字速度 / 字每秒"
                           value={selectedLayer.text.charsPerSecond}
                           min={1}
@@ -3982,7 +4183,30 @@ export default function TheaterApp() {
                               l.text!.charsPerSecond = v;
                             })
                           }
-                        />
+                        />}
+                        <label className="stack-field">
+                          退场动效
+                          <select aria-label="退场动效" value={selectedLayer.text.exit ?? ""} onChange={e =>
+                            updateLayer(l => { l.text!.exit = (e.target.value || undefined) as TitleMotion | undefined; })
+                          }>
+                            <option value="">无</option>
+                            {Object.entries(titleMotions)
+                              .filter(([id]) => id !== "drift" && id !== "pulse")
+                              .map(([id, label]) => <option value={id} key={id}>{label}</option>)}
+                          </select>
+                        </label>
+                        {(isTitleMotion(selectedLayer.text.animation) || selectedLayer.text.exit) &&
+                          <div className="property-grid">
+                            {isTitleMotion(selectedLayer.text.animation) && !["drift", "pulse"].includes(selectedLayer.text.animation) &&
+                              <Num label="入场时长 / 秒" min={.01} max={10} value={selectedLayer.text.entranceDuration ?? defaultTitleDuration}
+                                onChange={v => updateLayer(l => { l.text!.entranceDuration = v; })} />}
+                            {selectedLayer.text.exit &&
+                              <Num label="退场时长 / 秒" min={.01} max={10} value={selectedLayer.text.exitDuration ?? .35}
+                                onChange={v => updateLayer(l => { l.text!.exitDuration = v; })} />}
+                            <Num label="动效幅度" min={0} max={1} value={selectedLayer.text.motionAmount ?? defaultTitleAmount}
+                              onChange={v => updateLayer(l => { l.text!.motionAmount = v; })} />
+                          </div>
+                        }
                       </>
                     )}
                   </>
@@ -4211,6 +4435,15 @@ export default function TheaterApp() {
                         ? "调节同组中位于本层下方的合成画面；上方图层不受影响。"
                         : "局部效果只作用于此图层，可在其上方创建后处理层调节整组画面。"}
                     </p>
+                    <ShaderControls
+                      key={selectedLayer.id}
+                      effects={selectedLayer.effects}
+                      onRecipe={recipe => updateLayer(l => { l.effects.stylize = recipe; })}
+                      amount={animated!.effects.stylizeMix ?? 1}
+                      onAmount={v => setValue("effects.stylizeMix", v)}
+                      onKey={() => setValue("effects.stylizeMix", animated!.effects.stylizeMix ?? 1, true)}
+                      keyed={!!selectedLayer.animation["effects.stylizeMix"]?.length}
+                    />
                     <label className="stack-field">
                       模糊算法
                       <select
@@ -4681,7 +4914,6 @@ export default function TheaterApp() {
             onRecord={recordProperty}
             onValue={editProperty}
             onWriteKeys={(b, keys) => change((s) => writeProperty(s, b, keys))}
-            height={timelineHeight}
             onHeight={setTimelineHeight}
             time={time}
             playing={playing}
@@ -4715,7 +4947,7 @@ export default function TheaterApp() {
               title="调整曲线区高度"
               onPointerDown={(e) => {
                 const y = e.clientY,
-                  start = timelineHeight;
+                  start = e.currentTarget.parentElement!.clientHeight;
                 watchPointer(
                   e,
                   (v) =>
@@ -4723,8 +4955,8 @@ export default function TheaterApp() {
                       clamp(
                         start + y - v.clientY,
                         210,
-                        window.innerHeight * 0.68,
-                      ),
+                        window.innerHeight * 0.62,
+                      ) - 95,
                     ),
                   () => {},
                 );
@@ -4771,13 +5003,29 @@ export default function TheaterApp() {
           ref={menuRef}
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
-          {contextMenu.ids.length > 0 ? (
+          {contextMenu.ids.length > 0 && (
             <>
               <small>
                 {contextMenu.ids.length === 1
-                  ? scene.layers.find((l) => l.id === contextMenu.ids[0])?.name
+                  ? scene.layers.find(l => l.id === contextMenu.ids[0])?.name
                   : contextMenu.ids.length + " 个对象"}
               </small>
+              <button role="menuitem" onClick={() => {
+                copyObjects(contextMenu.ids);
+                setContextMenu(undefined);
+              }}>
+                <Copy size={14} /> 复制对象 <kbd>Ctrl+C</kbd>
+              </button>
+            </>
+          )}
+          <button role="menuitem" disabled={!canPaste(true)} onClick={() => {
+            pasteSelection(true);
+            setContextMenu(undefined);
+          }}>
+            <ClipboardPaste size={14} /> 原地粘贴 <kbd>Ctrl+V</kbd>
+          </button>
+          {contextMenu.ids.length > 0 ? (
+            <>
               <button
                 role="menuitem"
                 onClick={() => {
@@ -4959,7 +5207,7 @@ export default function TheaterApp() {
       {modal && (
         <div className="modal-backdrop">
           <div
-            className={"modal " + (modal === "help" ? "help-modal" : "")}
+            className={`modal ${modal}-modal`}
             role="dialog"
             aria-modal="true"
           >
@@ -5055,8 +5303,12 @@ export default function TheaterApp() {
             )}
             {modal === "export" && (
               <>
-                <h1>导出小剧场</h1>
-                <p>包括图层、相机、景深、后处理、文本与混合音频。</p>
+                <h1>导出成片</h1>
+                <div className="export-summary" aria-label="成片规格">
+                  <span><small>分辨率</small><strong>{scene.width} × {scene.height}</strong></span>
+                  <span><small>帧率</small><strong>{scene.fps} fps</strong></span>
+                  <span><small>时长</small><strong>{(onlyWork ? scene.workArea.end - scene.workArea.start : scene.duration).toFixed(2)} s</strong></span>
+                </div>
                 <div className="export-options">
                   {[
                     ["mp4", "MP4 H.264", "通用兼容 · AAC 音频"],
@@ -5069,6 +5321,7 @@ export default function TheaterApp() {
                     <button
                       key={id}
                       className={exportFormat === id ? "selected" : ""}
+                      aria-pressed={exportFormat === id}
                       disabled={!!busy}
                       onClick={() => {
                         setExportFormat(id);
@@ -5099,24 +5352,14 @@ export default function TheaterApp() {
                     </small>
                   </label>
                 )}
-                <label className="toggle-line">
-                  <input
-                    type="checkbox"
-                    checked={onlyWork}
-                    onChange={(e) => setOnlyWork(e.target.checked)}
-                  />
-                  仅导出工作区 {scene.workArea.start.toFixed(2)}–
-                  {scene.workArea.end.toFixed(2)}s
-                </label>
-                <p>
-                  {scene.width}×{scene.height} · {scene.fps} FPS ·{" "}
-                  {onlyWork
-                    ? (scene.workArea.end - scene.workArea.start).toFixed(2)
-                    : scene.duration}
-                  s
-                </p>
+                <div className="export-range" aria-label="导出范围">
+                  <button disabled={!!busy} aria-pressed={!onlyWork} onClick={() => setOnlyWork(false)}>整段</button>
+                  <button disabled={!!busy} aria-pressed={onlyWork} onClick={() => setOnlyWork(true)}>
+                    工作区 {scene.workArea.start.toFixed(2)}–{scene.workArea.end.toFixed(2)} s
+                  </button>
+                </div>
                 {exportStatus && (
-                  <div className="export-progress">
+                  <div className="export-progress" role="status">
                     <div>
                       <i style={{ width: progress * 100 + "%" }} />
                     </div>

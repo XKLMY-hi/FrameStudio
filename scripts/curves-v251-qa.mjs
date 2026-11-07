@@ -86,7 +86,7 @@ try{
     await click("三维预览",p.locator(".scene-view-toolbar"));
     await p.getByTitle("放大预览",{exact:true}).click();
     const canvas=await p.locator(".scene-canvas").first().boundingBox();
-    await p.mouse.click(canvas.x+canvas.width-3,canvas.y+canvas.height-3,{button:"right"});
+    await p.mouse.click(canvas.x+canvas.width-10,canvas.y+canvas.height-10,{button:"right"});
     out.edgeMenu=await menuBounds();
     await p.keyboard.press("Escape");await p.keyboard.press("Escape");
     await click("成片",p.locator(".scene-view-toolbar"));
