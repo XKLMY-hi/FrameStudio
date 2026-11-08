@@ -1,6 +1,7 @@
 import { Project, Param } from "./types";
 import { classify, evaluate, evaluationContext } from "./engine";
 import {cubismMemoryGuard,CubismMemoryGuard} from './cubism-memory';
+import { cubism2, Cubism2Pose, cubism2Settings, isCubism2File } from "./cubism2";
 declare global {
   interface Window {
     PIXI: any;
@@ -76,7 +77,8 @@ function rgb(hex: string) {
 export class StudioRenderer {
   app: any;
   model: any;
-  memoryGuard: CubismMemoryGuard;
+  memoryGuard?: CubismMemoryGuard;
+  private legacy?: Cubism2Pose;
   private detachMemory?:()=>void;
   params: Param[] = [];
   physicsData: any;
@@ -108,8 +110,7 @@ export class StudioRenderer {
   ownsApp = true;
   constructor(host?: HTMLElement, sharedApp?: any) {
     const P = window.PIXI;
-    P.live2d.config.logLevel = 3;
-    this.memoryGuard=cubismMemoryGuard(window.Live2DCubismCore);
+    if (P.live2d?.config) P.live2d.config.logLevel = 3;
     this.app =
       sharedApp ||
       new P.Application({
@@ -133,7 +134,12 @@ export class StudioRenderer {
     const seq = ++this.loadSequence,
       P = window.PIXI;
     const settings = await fetch(url).then((r) => r.json());
-    const model = await P.live2d.Live2DModel.from(url, {
+    const adapter = isCubism2File(url) ? await cubism2() : undefined;
+    const source = adapter ? cubism2Settings(adapter, settings, url) : url;
+    if (!adapter && !P.live2d?.Live2DModel)
+      throw Error("未找到新版 Live2D Cubism Core 运行库");
+    if (!adapter) this.memoryGuard ??= cubismMemoryGuard(window.Live2DCubismCore);
+    const model = await (adapter || P.live2d).Live2DModel.from(source, {
       autoUpdate: false,
       autoInteract: false,
       motionPreload: "NONE",
@@ -146,12 +152,22 @@ export class StudioRenderer {
     this.detachMemory?.();
     this.model?.destroy();
     this.model = model;
-    this.detachMemory=this.memoryGuard.track(model.internalModel.coreModel,()=>this.invalidate());
+    const internal = model.internalModel;
+    this.legacy = adapter ? new Cubism2Pose(internal.coreModel, adapter, internal.pose) : undefined;
+    this.detachMemory = undefined;
+    if (this.legacy) {
+      const pose = this.legacy;
+      // Cubism 2 updates clipping masks with the active WebGL target.
+      // Let Pixi call this after binding the model's render target.
+      internal.update = () => pose.update();
+    } else {
+      this.detachMemory = this.memoryGuard!.track(internal.coreModel, () => this.invalidate());
+    }
     this.modelGroups = settings.Groups || [];
     model.internalModel.motionManager.stopAllMotions();
     this.stage.addChild(model);
-    const raw = model.internalModel.coreModel._model;
-    this.partDefaults = raw.parts.opacities.slice();
+    const raw = this.legacy?.raw ?? internal.coreModel._model;
+    this.partDefaults = raw.parts?.opacities.slice();
     this.params = Array.from(raw.parameters.ids, (id: any, i: number) => ({
       id: String(id),
       name: labels[id] || String(id),
@@ -171,9 +187,10 @@ export class StudioRenderer {
       } catch {}
     }
     this.physicsData = null;
-    if (settings.FileReferences?.Physics) {
+    const physicsFile = adapter ? source.physics : settings.FileReferences?.Physics;
+    if (physicsFile) {
       try {
-        const u = new URL(settings.FileReferences.Physics, url);
+        const u = new URL(physicsFile, url);
         new URL(url).searchParams.forEach((v, k) => u.searchParams.set(k, v));
         this.physicsData = await fetch(u).then((r) => r.json());
       } catch {}
@@ -190,7 +207,7 @@ export class StudioRenderer {
       (this.app.screen.width - iw * scale) / 2,
       (this.app.screen.height - ih * scale) / 2,
     );
-    model.internalModel.coreModel.update();
+    this.updateModel();
     this.stage.filters = null;
     this.app.renderer.render(this.stage);
     const w = this.app.screen.width,
@@ -224,13 +241,13 @@ export class StudioRenderer {
         : { x: 0, y: 0, w: iw, h: ih };
     return this.params;
   }
+  private updateModel() {
+    if (this.legacy) this.model.update(1);
+    else this.model.internalModel.coreModel.update();
+  }
   resetPhysics() {
     this.cancelWarm();
-    this.physics = this.physicsData
-      ? window.PIXI.live2d.CubismPhysics.create(
-          structuredClone(this.physicsData),
-        )
-      : null;
+    this.physics = this.createPhysics();
     this.lastT = -1;
     this.physicsTick = -1;
     this.physicsOffsets = undefined;
@@ -238,6 +255,13 @@ export class StudioRenderer {
     this.contextProject = undefined;
     this.dirty = true;
     this.warming = false;
+  }
+  private createPhysics() {
+    if (!this.physicsData) return null;
+    const data = structuredClone(this.physicsData);
+    return this.legacy
+      ? this.legacy.createPhysics(data)
+      : window.PIXI.live2d.CubismPhysics.create(data);
   }
   invalidate() {
     this.dirty = true;
@@ -312,9 +336,7 @@ export class StudioRenderer {
       ...[...this.snapshots.keys()].filter((t) => t <= target),
     );
     const saved = this.snapshots.get(tick);
-    this.physics = this.physicsData
-      ? window.PIXI.live2d.CubismPhysics.create(this.physicsData)
-      : null;
+    this.physics = this.createPhysics();
     this.physicsTick = saved ? tick : -1;
     this.physicsOffsets = saved?.offsets?.slice();
     if (saved) {
@@ -329,10 +351,11 @@ export class StudioRenderer {
   }
   pose(p: Project, t: number, dt: number) {
     if (!this.model) return;
-    const core = this.model.internalModel.coreModel;
-    const raw = core._model;
+    const core = this.legacy ?? this.model.internalModel.coreModel;
+    const raw = this.legacy?.raw ?? core._model;
     raw.parameters.values.set(raw.parameters.defaultValues);
     if (this.partDefaults) raw.parts.opacities.set(this.partDefaults);
+    this.legacy?.resetParts();
     if (this.contextProject !== p) {
       this.context = evaluationContext(p, this.params);
       this.contextProject = p;
@@ -394,7 +417,7 @@ export class StudioRenderer {
       this.pose(p, t, 0);
       if (this.warming && !exact) this.scheduleWarm(p, target);
     } else this.pose(p, t, 0);
-    this.model.internalModel.coreModel.update();
+    this.updateModel();
     this.lastT = t;
     this.lastProject = p;
     this.dirty = false;

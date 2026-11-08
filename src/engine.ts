@@ -121,31 +121,68 @@ export function parseAsset(json: any, name: string): Asset {
         blend: p.Blend || "Add",
       })),
     };
-  throw Error("请选择 .motion3.json 或 .exp3.json 文件");
+  if (json.type === "Live2D Expression" || Array.isArray(json.params)) {
+    return {
+      id: uid(),
+      name,
+      kind: "expression",
+      duration: 3,
+      fps: 30,
+      curves: [],
+      fadeIn: legacySeconds(json.fade_in) ?? 0.5,
+      fadeOut: legacySeconds(json.fade_out) ?? 0.5,
+      expression: (json.params ?? []).map((p: any) => ({
+        id: p.id,
+        value: p.calc === "mult" ? p.val / (p.def || 1) :
+          p.calc === "set" ? p.val : p.val - (p.def ?? 0),
+        blend: p.calc === "mult" ? "Multiply" : p.calc === "set" ? "Overwrite" : "Add",
+      })),
+    };
+  }
+  throw Error("请选择 .motion3.json、.mtn、.exp3.json 或 .exp.json 文件");
 }
+const legacySeconds = (ms: number) => Number.isFinite(ms) && ms >= 0 ? ms / 1000 : undefined;
+
+export function parseCatalogAsset(entry: {
+  name: string;
+  source: string;
+  text?: string;
+  json?: unknown;
+  fadeIn?: number;
+  fadeOut?: number;
+}) {
+  const asset = typeof entry.text === "string" ? parseLegacy(entry.text, entry.name) :
+    parseAsset(entry.json, entry.name);
+  asset.source = entry.source;
+  if (entry.fadeIn !== undefined && entry.fadeIn >= 0) asset.fadeIn = entry.fadeIn;
+  if (entry.fadeOut !== undefined && entry.fadeOut >= 0) asset.fadeOut = entry.fadeOut;
+  return asset;
+}
+
 export function parseLegacy(text: string, name: string): Asset {
-  let fps = 30;
+  const metadata = new Map<string, number>();
+  const samples = new Map<string, number[]>();
   const curves: Curve[] = [];
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of text.split(/[\r\n]+/)) {
     const s = line.trim();
     if (!s || s.startsWith("#")) continue;
     const n = s.indexOf("=");
     if (n < 0) continue;
-    const id = s.slice(0, n).trim(),
-      v = s
-        .slice(n + 1)
-        .split(",")
-        .map(Number);
-    if (id === "$fps") {
-      fps = v[0] || 30;
-      continue;
-    }
-    if (id.startsWith("$")) continue;
+    const id = s.slice(0, n).trim();
+    const value = s.slice(n + 1).trim();
+    if (id.startsWith("$")) metadata.set(id.toLowerCase(), Number(value));
+    else if (id && value) samples.set(id, value.replace(/,\s*$/, "").split(",").map(Number));
+  }
+  const rate = metadata.get("$fps") ?? 30;
+  const fps = Number.isFinite(rate) && rate > 0 ? rate : 30;
+  for (const [id, v] of samples) {
     if (v.some((x) => !Number.isFinite(x))) continue;
     curves.push({
       id,
       target: "Parameter",
       keys: v.map((x, i) => ({ t: i / fps, v: x, mode: "linear" })),
+      fadeIn: legacySeconds(metadata.get("$fadein:" + id.toLowerCase()) ?? -1),
+      fadeOut: legacySeconds(metadata.get("$fadeout:" + id.toLowerCase()) ?? -1),
     });
   }
   if (!curves.length) throw Error("未找到旧版动作参数");
@@ -156,6 +193,8 @@ export function parseLegacy(text: string, name: string): Asset {
     duration: Math.max(...curves.map((c) => c.keys.length)) / fps,
     fps,
     curves,
+    fadeIn: legacySeconds(metadata.get("$fadein") ?? -1),
+    fadeOut: legacySeconds(metadata.get("$fadeout") ?? -1),
   };
 }
 export function clipTime(c: Clip, a: Asset, t: number) {

@@ -62,7 +62,8 @@ import {
   groupNames,
   uid,
 } from "../types";
-import { clamp, classify, parseAsset, parseLegacy } from "../engine";
+import { clamp, classify, parseAsset, parseCatalogAsset, parseLegacy } from "../engine";
+import { cubism2, isCubism2File, lipParameters } from "../cubism2";
 import { CurveWorkspace } from "./CurveWorkspace";
 import { LightPanel } from "./LightPanel";
 import { ModelPreprocessPanel } from "./ModelPreprocessPanel";
@@ -623,19 +624,14 @@ export default function TheaterApp() {
     name: string,
     existing?: Scene,
   ) {
+    if (isCubism2File(file)) await cubism2();
     const catalog = await api(
       "model-catalog?id=" +
         encodeURIComponent(modelId) +
         "&file=" +
         encodeURIComponent(file),
     );
-    const assets: Asset[] = catalog.assets.map((a: any) => {
-      const v = parseAsset(a.json, a.name);
-      v.source = a.source;
-      if (a.fadeIn >= 0) v.fadeIn = a.fadeIn;
-      if (a.fadeOut >= 0) v.fadeOut = a.fadeOut;
-      return v;
-    });
+    const assets: Asset[] = catalog.assets.map(parseCatalogAsset);
     const resource: ModelResource = { id: uid(), name, modelId, file, assets },
       l = layer("model", name);
     l.width = scene.width * 0.38;
@@ -647,8 +643,7 @@ export default function TheaterApp() {
       groupOverrides: {},
       baseValues: {},
       keys: [],
-      lipOpen: "ParamMouthOpenY",
-      lipForm: "ParamMouthForm",
+      ...lipParameters(file, assets),
     };
     const assign = (p: Scene) => {
       p.models.push(resource);
@@ -716,7 +711,11 @@ export default function TheaterApp() {
               const file =
                 m.files.find((f: any) => f.path.includes("/coat.model3")) ||
                 m.files[0];
-              await addModel(m.id, file.path, "角色 1", p);
+              try {
+                await addModel(m.id, file.path, "角色 1", p);
+              } catch (e: any) {
+                notify(e.message);
+              }
             }
             await loadScene(p);
           }
@@ -2695,8 +2694,7 @@ export default function TheaterApp() {
                             groupOverrides: {},
                             baseValues: {},
                             keys: [],
-                            lipOpen: "ParamMouthOpenY",
-                            lipForm: "ParamMouthForm",
+                            ...lipParameters(m.file, m.assets),
                           };
                           change((s) => addVisual(s, l));
                           selectLayer(l.id);

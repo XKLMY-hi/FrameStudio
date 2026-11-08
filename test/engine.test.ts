@@ -15,3 +15,31 @@ test('fade intervals never leak a clip outside its duration',()=>{const p=emptyP
 test('expression multiply and add operate on the underlying motion',()=>{const p=emptyProject();p.assets=[motion('a',.4,'ParamEyeLOpen'),{id:'e',name:'e',kind:'expression',duration:3,fps:30,curves:[],expression:[{id:'ParamEyeLOpen',value:.5,blend:'Multiply'}]}];const e=clip('e');e.blend='override';p.tracks[0].clips=[clip('a')];p.tracks[1].clips=[e];near(evaluate(p,parameters,1).parameters.ParamEyeLOpen,.2);p.assets[1].expression![0]={id:'ParamEyeLOpen',value:.1,blend:'Add'};near(evaluate(p,parameters,1).parameters.ParamEyeLOpen,.5);});
 test('curve roundtrip retains Bezier control handles',()=>{const a=motion('a',0);a.curves[0].keys=decodeSegments([0,0,1,.1,20,.9,-10,1,5,2,2,6]);a.duration=2;const b=parseAsset(exportMotion(a),'roundtrip');for(let t=0;t<2;t+=.031)near(sampleCurve(a.curves[0],t),sampleCurve(b.curves[0],t));});
 test('legacy .mtn frame count and audio cues produce precise timelines',()=>{const a=parseLegacy('$fps=30\nPARAM_ANGLE_X=0,10,20\n','legacy');near(a.duration,.1);const curves=cuesToCurves([{start:0,end:.3,value:'X'},{start:.3,end:.8,value:'D'},{start:.8,end:1,value:'X'}],1);assert.ok(sampleCurve(curves[0],.5)>.9);near(sampleCurve(curves[0],1),0);assert.equal(classify('ParamMouthOpenY'),'mouth');});
+
+test("Cubism 2 motion and expression metadata retain timing and blending", () => {
+  const motion = parseLegacy(
+    "PARAM_ANGLE_X=0,10,20,30\r$fps=20\r$fadein=750\r$fadeout:PARAM_ANGLE_X=250",
+    "motion",
+  );
+  near(motion.duration, 0.2);
+  near(sampleCurve(motion.curves[0], 0.075), 15);
+  assert.equal(motion.fadeIn, 0.75);
+  assert.equal(motion.curves[0].fadeOut, 0.25);
+
+  const expression = parseAsset({
+    type: "Live2D Expression",
+    fade_in: 300,
+    params: [
+      { id: "PARAM_EYE_L_OPEN", val: 0.5, def: 2, calc: "mult" },
+      { id: "PARAM_ANGLE_X", val: 10, def: 2 },
+      { id: "PARAM_MOUTH_FORM", val: 0.25, calc: "set" },
+    ],
+  }, "expression");
+  assert.equal(expression.fadeIn, 0.3);
+  assert.deepEqual(expression.expression, [
+    { id: "PARAM_EYE_L_OPEN", value: 0.25, blend: "Multiply" },
+    { id: "PARAM_ANGLE_X", value: 8, blend: "Add" },
+    { id: "PARAM_MOUTH_FORM", value: 0.25, blend: "Overwrite" },
+  ]);
+  assert.deepEqual(parseAsset({ type: "Live2D Expression" }, "neutral").expression, []);
+});

@@ -25,6 +25,7 @@ if not (source / "FrameStudio.exe").is_file():
 asset_extensions = (
     ".zip", ".livemg", ".l2dstudio", ".moc", ".moc3", ".model3.json", ".motion3.json",
     ".physics3.json", ".exp3.json", ".pose3.json", ".cdi3.json", ".userdata3.json",
+    ".mtn", ".model.json", ".physics.json", ".exp.json", ".pose.json",
 )
 local_previews = {
     "动作试听预览.png", "变换控制器预览.png", "曲线工作区预览.png", "模型预处理预览.png", "界面预览.png",
@@ -35,6 +36,7 @@ for file in portable_files:
     if (
         parts[:3] == ("resources", "app", "data")
         or file.name.casefold().endswith(asset_extensions)
+        or file.name.casefold() in {"model.json", "live2d.min.js"}
         or file.name.casefold() in local_previews
     ):
         parser.error(f"Remove local assets from the public build: {relative}")

@@ -153,18 +153,35 @@ export async function createStudioServer({
       }
     }
   }
+  async function modelFiles(dir) {
+    const all = await walk(dir);
+    const modern = all.filter((file) => /\.model3\.json$/i.test(file));
+    const legacy = [];
+    for (const file of all.filter((file) => /(?:^|[/.])model\.json$/i.test(file))) {
+      try {
+        const setting = JSON.parse((await fs.readFile(inside(dir, file), "utf8")).replace(/^\uFEFF/, ""));
+        if (
+          typeof setting.model !== "string" || !/\.moc$/i.test(setting.model) ||
+          !Array.isArray(setting.textures) || !setting.textures.length
+        ) continue;
+        const refs = [setting.model, ...setting.textures];
+        if (refs.every((ref) => typeof ref === "string" && all.includes(
+          path.posix.normalize(path.posix.join(path.posix.dirname(file), ref.replaceAll("\\", "/"))),
+        ))) legacy.push(file);
+      } catch {}
+    }
+    return [...modern, ...legacy].map((file) => ({ path: file, name: path.basename(file) }));
+  }
   async function modelList() {
     const result = [];
     for (const e of await fs.readdir(models, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
-      const files = (await walk(path.join(models, e.name))).filter((p) =>
-        /\.model3\.json$/i.test(p),
-      );
+      if (!e.isDirectory() || e.name.startsWith(".")) continue;
+      const files = await modelFiles(path.join(models, e.name));
       if (files.length)
         result.push({
           id: e.name,
           name: e.name === "demo" ? "银灰大衣 · 示例模型" : e.name,
-          files: files.map((p) => ({ path: p, name: path.basename(p) })),
+          files,
         });
     }
     return result;
@@ -254,60 +271,55 @@ export async function createStudioServer({
         )
           .replace(/[^\p{L}\p{N}_. -]/gu, "_")
           .slice(0, 70);
-        const id = name.replace(/\.zip$/i, "") + "-" + randomUUID().slice(0, 6),
-          dest = inside(models, id);
-        await fs.mkdir(dest, { recursive: true });
-        await unpack(await bytes(req), dest);
-        const list = await modelList();
-        const entry = list.find((m) => m.id === id);
-        if (!entry)
-          throw Error("压缩包内未找到 .model3.json，请导出运行时模型");
-        return send(entry);
+        const id = name.replace(/^\.+|\.zip$/gi, "") + "-" + randomUUID().slice(0, 6);
+        const pending = inside(models, "." + id + ".import");
+        await fs.mkdir(pending);
+        try {
+          await unpack(await bytes(req), pending);
+          const files = await modelFiles(pending);
+          if (!files.length)
+            throw Error("未找到可用的运行时模型。请提供 .model3.json，或旧版 model.json、.moc 和贴图。");
+          await fs.rename(pending, inside(models, id));
+          return send({ id, name: id, files });
+        } finally {
+          await fs.rm(pending, { recursive: true, force: true });
+        }
       }
       if (url.pathname === "/api/model-catalog") {
         const id = url.searchParams.get("id"),
           file = url.searchParams.get("file");
         const modelRoot = inside(models, id),
           filename = inside(modelRoot, file);
-        const model = JSON.parse(await fs.readFile(filename, "utf8"));
+        const model = JSON.parse((await fs.readFile(filename, "utf8")).replace(/^\uFEFF/, ""));
         const parent = path.dirname(filename),
           assets = [];
-        for (const [group, entries] of Object.entries(
-          model.FileReferences?.Motions || {},
-        )) {
-          for (const [n, entry] of entries.entries()) {
-            const abs = inside(
-              modelRoot,
-              path.relative(modelRoot, path.resolve(parent, entry.File)),
-            );
-            try {
-              assets.push({
-                name: group + (entries.length > 1 ? " " + (n + 1) : ""),
-                json: JSON.parse(await fs.readFile(abs, "utf8")),
-                source: entry.File,
-                fadeIn: entry.FadeInTime,
-                fadeOut: entry.FadeOutTime,
-              });
-            } catch {}
-          }
-        }
-        for (const entry of model.FileReferences?.Expressions || []) {
+        const legacy = !model.FileReferences && typeof model.model === "string";
+        async function asset(name, source, fadeIn, fadeOut) {
+          if (typeof source !== "string") return;
           try {
-            assets.push({
-              name: entry.Name,
-              json: JSON.parse(
-                await fs.readFile(
-                  inside(
-                    modelRoot,
-                    path.relative(modelRoot, path.resolve(parent, entry.File)),
-                  ),
-                  "utf8",
-                ),
-              ),
-              source: entry.File,
-            });
+            const file = inside(modelRoot, path.relative(modelRoot, path.resolve(parent, source)));
+            const text = (await fs.readFile(file, "utf8")).replace(/^\uFEFF/, "");
+            const content = /\.mtn$/i.test(source) ? { text } : { json: JSON.parse(text) };
+            assets.push({ name, source, ...content, fadeIn, fadeOut });
           } catch {}
         }
+        const seconds = (ms) => Number.isFinite(ms) && ms >= 0 ? ms / 1000 : undefined;
+        for (const [group, entries] of Object.entries(
+          (legacy ? model.motions : model.FileReferences?.Motions) || {},
+        )) {
+          if (!Array.isArray(entries)) continue;
+          for (const [n, entry] of entries.entries()) {
+            if (!entry) continue;
+            await asset(
+              group + (entries.length > 1 ? " " + (n + 1) : ""),
+              legacy ? entry.file : entry.File,
+              legacy ? seconds(entry.fade_in) : entry.FadeInTime,
+              legacy ? seconds(entry.fade_out) : entry.FadeOutTime,
+            );
+          }
+        }
+        for (const entry of (legacy ? model.expressions : model.FileReferences?.Expressions) || [])
+          if (entry) await asset(legacy ? entry.name : entry.Name, legacy ? entry.file : entry.File);
         return send({ model, assets });
       }
       if (url.pathname === "/api/media-import" && req.method === "POST") {

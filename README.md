@@ -1,4 +1,4 @@
-# FrameStudio 2.7.2
+# FrameStudio 2.8.0
 
 ![FrameStudio 品牌头图，画幅中的琥珀色聚光灯](docs/brand/framestudio-banner.png)
 
@@ -9,6 +9,24 @@ FrameStudio 是 Windows 上的离线 Live2D 小剧场编辑器。它支持多角
 公开仓库和便携发行包不附带 Live2D 模型、模型素材或含模型的工程。启动后可在「素材 → 模型」导入你有权使用的模型。
 
 2.7.2 以前的本地演示包可能含有商业模型和角色截图。对外分享请使用全新打包的便携版，轻量补丁会保留旧安装目录中的素材。
+
+## 实机截图
+
+FrameStudio 2.8.0 中的「暮色放送」示例场景。
+
+**成片预览与动作时间线**
+
+![FrameStudio 实机截图，桃濑日和的成片预览及动作时间线](https://raw.githubusercontent.com/XKLMY-hi/FrameStudio/main/docs/screenshots/workspace.png)
+
+**三维布光与双视图**
+
+![FrameStudio 实机截图，左侧三维场景的灯光与右侧成片视图](https://raw.githubusercontent.com/XKLMY-hi/FrameStudio/main/docs/screenshots/spatial-lighting.png)
+
+**模型参数曲线编辑**
+
+![FrameStudio 实机截图，桃濑日和的头部转向参数曲线和贝塞尔关键帧](https://raw.githubusercontent.com/XKLMY-hi/FrameStudio/main/docs/screenshots/curve-editor.png)
+
+本作品的角色在运用株式会社Live2D的著作物素材样本时依据了株式会社Live2D规定的协议。本作品完全根据制作者的自我裁量制作而成。[桃濑日和官方样本](https://www.live2d.com/en/learn/sample/momose-hiyori/) · [素材使用条款](https://www.live2d.com/zh-CHS/learn/sample/model-terms/)
 
 ## 视觉设计
 
@@ -25,7 +43,13 @@ V2 图标将画幅、聚光灯和表演者组合在一起。编辑器延续黑�
 
 ## 从旧版升级
 
-先关闭程序，将 **FrameStudio_2.7.2_轻量更新补丁.zip** 解压到 `FrameStudio.exe` 所在目录，覆盖同名程序文件。要同时更新资源管理器中的程序文件图标，请使用完整便携版里的 `FrameStudio.exe`。更早版本使用原 `帧间.exe` 所在目录。补丁不包含 data，不覆盖原有模型、音频和草稿。首次打开会将旧自动草稿迁移为多图层场景，旧草稿文件保留。旧 `.l2dstudio` 工程也可直接打开，再另存 `.livemg`。
+先关闭程序，将 **FrameStudio_2.8.0_轻量更新补丁.zip** 解压到 `FrameStudio.exe` 所在目录，覆盖同名程序文件。要同时更新资源管理器中的程序文件图标，请使用完整便携版里的 `FrameStudio.exe`。更早版本使用原 `帧间.exe` 所在目录。补丁不包含 data，不覆盖原有模型、音频和草稿。首次打开会将旧自动草稿迁移为多图层场景，旧草稿文件保留。旧 `.l2dstudio` 工程也可直接打开，再另存 `.livemg`。
+
+## 2.8 旧版 Live2D 模型兼容
+
+可在同一个场景使用 Cubism 2.1（`model.json` 或 `*.model.json`、`.moc`）与 Cubism 3/4/5（`.model3.json`、`.moc3`）。从「素材 → 模型」导入包含配置、模型与贴图的 ZIP 或文件夹。旧版 `.mtn` 动作、`.exp.json` 表情和物理可用于时间线、参数编辑和输出。
+
+使用旧模型前，在便携目录的 `resources/app/data/runtime/` 放入 Cubism 2.1 Web 运行库 `live2d.min.js`。从源码运行时，路径是项目根目录下的 `data/runtime/live2d.min.js`。首次导入旧模型时按需加载，之后可离线使用。[运行库说明](https://github.com/guansss/pixi-live2d-display/tree/v0.4.0/core#cubism-21)
 
 ## 2.7 文字动效、素材精修与着色器
 
@@ -139,7 +163,7 @@ V2 图标将画幅、聚光灯和表演者组合在一起。编辑器延续黑�
 
 默认低分辨率预览，播放上限 30 FPS；暂停时不持续渲染。物理使用固定 60 Hz 步长和状态缓存。可降低预览清晰度、减少可见角色或关闭景深/泛光以减轻负担。多角色、滤镜和大图会增加开销，实际帧率取决于模型与硬件，不能保证所有场景满帧。
 
-支持 Cubism 3/4/5 model3 运行时模型；暂不包含 Cubism 2 `.moc` 渲染、模型拆件、视频素材轨、音频降噪/频谱编辑、3D 网格、逐字字幕或真实三维法线照明。
+暂不包含模型拆件、视频素材轨、音频降噪/频谱编辑、3D 网格、逐字字幕或真实三维法线照明。
 
 ## 开发与验证
 
@@ -154,9 +178,9 @@ npm start
 
 如需视频导出，将 FFmpeg 放到 `tools/ffmpeg.exe`。如需离线口型识别，将 Rhubarb Lip Sync 1.14.0 的 Windows 发行目录（含资源）解压到 `tools/rhubarb/`。便携打包使用本地工具，含模型的界面验收使用本地素材。组件及来源见 [第三方组件说明](THIRD-PARTY-NOTICES.md)。
 
-构建后运行 `npm run package` 生成新的便携目录，再用 `python scripts/archive-portable.py --baseline 2.7.1` 生成 2.7.2 的便携包和补丁。归档脚本会检查本地数据、模型文件和旧版预览图。
+构建后运行 `npm run package` 生成新的便携目录，再用 `python scripts/archive-portable.py --baseline 2.7.2` 生成 2.8.0 的便携包和补丁。归档脚本会检查本地数据、模型文件和旧版预览图。
 
-50 项单元测试覆盖原动作引擎、场景变换、显式对象绑定、预设副本与工程格式。UI/导出测试在独立 QA 副本运行，不修改用户已解压的便携版。
+54 项单元测试覆盖原动作引擎、场景变换、显式对象绑定、预设副本与工程格式。UI/导出测试在独立 QA 副本运行，不修改用户已解压的便携版。
 
 `node scripts/v21-qa.mjs` 覆盖名称选中、双模型独立编辑、参数分行/拖动、无损动作预览、BGM 不触发识别、显式口型识别，以及实际 MP4/H.265/GIF/WebM 编码；`node --import tsx scripts/blur-v21-qa.mjs` 检查模糊透明边缘、采样质量、工程重开及播放性能。测试需要本地 QA 示例、工具与音频，不随运行时分发。
 

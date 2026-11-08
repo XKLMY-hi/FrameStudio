@@ -12,4 +12,3 @@ Copyright guansss and contributors. MIT License.
 https://github.com/guansss/pixi-live2d-display/blob/v0.4.0/LICENSE
 
 The model and original character artwork are user-supplied materials. This application does not change their ownership.
-The modified garment illustration was generated with the built-in ImageGen tool.

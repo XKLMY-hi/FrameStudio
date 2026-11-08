@@ -63,6 +63,7 @@ import {
   evaluate,
   exportMotion,
   parseAsset,
+  parseCatalogAsset,
   parseLegacy,
   sampleCurve,
 } from "./engine";
@@ -286,13 +287,7 @@ export default function App() {
             "&file=" +
             encodeURIComponent(p.modelFile),
         );
-        const assets: Asset[] = catalog.assets.map((a: any) => {
-          const v = parseAsset(a.json, a.name);
-          v.source = a.source;
-          if (a.fadeIn !== undefined) v.fadeIn = a.fadeIn;
-          if (a.fadeOut !== undefined) v.fadeOut = a.fadeOut;
-          return v;
-        });
+        const assets: Asset[] = catalog.assets.map(parseCatalogAsset);
         p.assets = assets;
       }
       pRef.current = p;
@@ -967,7 +962,7 @@ export default function App() {
                   : project.modelFile
                       .split("/")
                       .pop()
-                      ?.replace(".model3.json", "")}
+                      ?.replace(/\.model3?\.json$/i, "")}
               </strong>
               <span>
                 <i className={ready ? "ready-dot" : "waiting-dot"} />
@@ -2270,7 +2265,7 @@ export default function App() {
                 <h1>使用指南</h1>
                 <ol>
                   <li>
-                    <b>导入模型</b>：支持 Cubism 3/4/5 的 model3.json 运行时模型
+                    <b>导入模型</b>：支持 Cubism 2.1 的 model.json 和 Cubism 3/4/5 的 model3.json
                     ZIP 或完整文件夹。CMO3
                     是编辑器源文件，需要先导出运行时文件。
                   </li>

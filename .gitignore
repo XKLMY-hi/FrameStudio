@@ -19,6 +19,12 @@
 *.l2dstudio
 *.moc
 *.moc3
+*.mtn
+model.json
+*.model.json
+*.exp.json
+*.physics.json
+*.pose.json
 *.model3.json
 *.motion3.json
 *.physics3.json
