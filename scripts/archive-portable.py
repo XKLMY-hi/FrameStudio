@@ -41,7 +41,7 @@ for file in portable_files:
     ):
         parser.error(f"Remove local assets from the public build: {relative}")
 
-patch_files = [app / "package.json"]
+patch_files = [app / "package.json", app / "LICENSE"]
 for folder in ("dist", "backend", "electron"):
     for file in sorted((app / folder).rglob("*")):
         if not file.is_file():

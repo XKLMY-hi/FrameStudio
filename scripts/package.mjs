@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';import path from 'node:path';import {fileURLToPath} from 'node:url';import {spawnSync} from 'node:child_process';
-const root=fileURLToPath(new URL('../',import.meta.url));const {version}=JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8'));const release=path.join(root,'release');await fs.mkdir(release,{recursive:true});const dest=path.join(release,'FrameStudio-'+version+'-portable');try{await fs.access(dest);throw Error('Release already exists; use a fresh version directory to preserve the prior build.');}catch(e){if(e.code!=='ENOENT')throw e;}
+const root=fileURLToPath(new URL('../',import.meta.url));const {version,license:appLicense}=JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8'));const release=path.join(root,'release');await fs.mkdir(release,{recursive:true});const dest=path.join(release,'FrameStudio-'+version+'-portable');try{await fs.access(dest);throw Error('Release already exists; use a fresh version directory to preserve the prior build.');}catch(e){if(e.code!=='ENOENT')throw e;}
 await fs.cp(path.join(root,'node_modules/electron/dist'),dest,{recursive:true});await fs.rename(path.join(dest,'electron.exe'),path.join(dest,'FrameStudio.exe'));
 const launcherIcon=spawnSync('python',[path.join(root,'scripts/set-windows-icon.py'),path.join(dest,'FrameStudio.exe'),path.join(root,'public/framestudio.ico')],{stdio:'inherit',windowsHide:true});
 if(launcherIcon.error) throw launcherIcon.error;
@@ -7,9 +7,10 @@ if(launcherIcon.status!==0) throw Error('Failed to embed the FrameStudio launche
 const appRoot=path.join(dest,'resources','app');await fs.mkdir(appRoot,{recursive:true});
 for(const dir of ['dist','backend','electron'])await fs.cp(path.join(root,dir),path.join(appRoot,dir),{recursive:true});
 await fs.mkdir(path.join(appRoot,'node_modules'),{recursive:true});await fs.cp(path.join(root,'node_modules/fflate'),path.join(appRoot,'node_modules/fflate'),{recursive:true});
-await fs.writeFile(path.join(appRoot,'package.json'),JSON.stringify({name:'live2d-pocket-studio',productName:'FrameStudio',version,type:'module',main:'electron/main.cjs'},null,2));
+await fs.writeFile(path.join(appRoot,'package.json'),JSON.stringify({name:'live2d-pocket-studio',productName:'FrameStudio',version,license:appLicense,type:'module',main:'electron/main.cjs'},null,2));
 await fs.mkdir(path.join(appRoot,'tools'),{recursive:true});await fs.copyFile(path.join(root,'tools/ffmpeg.exe'),path.join(appRoot,'tools/ffmpeg.exe'));
 const rhBase=path.join(root,'tools/rhubarb/Rhubarb-Lip-Sync-1.14.0-Windows'),rhDest=path.join(appRoot,'tools/rhubarb');await fs.mkdir(rhDest,{recursive:true});for(const f of ['rhubarb.exe','res','LICENSE.md','README.adoc'])await fs.cp(path.join(rhBase,f),path.join(rhDest,f),{recursive:true});
+await fs.copyFile(path.join(root,'LICENSE'),path.join(appRoot,'LICENSE'));
 await fs.copyFile(path.join(root,'README.md'),path.join(dest,'使用说明.md'));
 await fs.copyFile(path.join(root,'THIRD-PARTY-NOTICES.md'),path.join(dest,'第三方组件说明.md'));
 await fs.copyFile(path.join(root,'SHADERS.md'),path.join(dest,'SHADERS.md'));

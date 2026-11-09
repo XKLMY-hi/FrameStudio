@@ -10,6 +10,12 @@ FrameStudio 是 Windows 上的离线 Live2D 小剧场编辑器。它支持多角
 
 2.7.2 以前的本地演示包可能含有商业模型和角色截图。对外分享请使用全新打包的便携版，轻量补丁会保留旧安装目录中的素材。
 
+## 开源许可证
+
+FrameStudio 原创源码采用 MIT 许可证。第三方组件和演示角色素材适用各自的许可条款。
+
+[MIT 许可证](https://github.com/XKLMY-hi/FrameStudio/blob/main/LICENSE) · [第三方组件说明](https://github.com/XKLMY-hi/FrameStudio/blob/main/THIRD-PARTY-NOTICES.md)
+
 ## 实机截图
 
 FrameStudio 2.8.0 中的「暮色放送」示例场景。
