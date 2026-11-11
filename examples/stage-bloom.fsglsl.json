@@ -1,0 +1,46 @@
+{
+  "format": "framestudio-glsl",
+  "version": 1,
+  "name": "暖光舞台泛光",
+  "parameters": {
+    "threshold": {
+      "label": "高光阈值",
+      "min": 0.1,
+      "max": 0.95,
+      "value": 0.52
+    },
+    "radius": {
+      "label": "扩散半径",
+      "min": 2,
+      "max": 80,
+      "value": 28
+    },
+    "intensity": {
+      "label": "泛光强度",
+      "min": 0,
+      "max": 2,
+      "value": 1
+    }
+  },
+  "passes": [
+    {
+      "id": "highlights",
+      "scale": 0.5,
+      "source": "vec4 shade(vec2 uv) {\n  vec4 c = source(uv);\n  float light = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));\n  float hot = smoothstep(p_threshold, min(1.0, p_threshold + 0.23), light);\n  return vec4(mix(c.rgb, vec3(1.0, 0.52, 0.22), 0.38), hot * c.a);\n}"
+    },
+    {
+      "id": "spreadX",
+      "scale": 0.5,
+      "source": "vec4 shade(vec2 uv) {\n  vec2 stepUV = vec2(uTexel.x, 0.0) * (p_radius / 4.0);\n  vec4 sum = vec4(0.0);\n  float weights = 0.0;\n  for (int i = 0; i < 9; i++) {\n    float offset = float(i) - 4.0;\n    float weight = exp(-offset * offset * 0.18);\n    vec4 c = inputColor(uv + stepUV * offset);\n    sum += vec4(c.rgb * c.a, c.a) * weight;\n    weights += weight;\n  }\n  return vec4(sum.rgb / max(0.00001, sum.a), sum.a / weights);\n}"
+    },
+    {
+      "id": "spreadY",
+      "scale": 0.5,
+      "source": "vec4 shade(vec2 uv) {\n  vec2 stepUV = vec2(0.0, uTexel.y) * (p_radius / 4.0);\n  vec4 sum = vec4(0.0);\n  float weights = 0.0;\n  for (int i = 0; i < 9; i++) {\n    float offset = float(i) - 4.0;\n    float weight = exp(-offset * offset * 0.18);\n    vec4 c = inputColor(uv + stepUV * offset);\n    sum += vec4(c.rgb * c.a, c.a) * weight;\n    weights += weight;\n  }\n  return vec4(sum.rgb / max(0.00001, sum.a), sum.a / weights);\n}"
+    },
+    {
+      "id": "composite",
+      "source": "vec4 shade(vec2 uv) {\n  vec4 c = source(uv);\n  vec4 g = sample_spreadY(uv);\n  float halo = clamp(g.a * p_intensity * 0.65, 0.0, 1.0);\n  float a = c.a + halo * (1.0 - c.a);\n  vec3 lit = 1.0 - (1.0 - c.rgb) * (1.0 - g.rgb * halo);\n  vec3 premult = lit * c.a + g.rgb * halo * (1.0 - c.a);\n  return vec4(premult / max(0.00001, a), a);\n}"
+    }
+  ]
+}

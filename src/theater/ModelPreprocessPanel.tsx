@@ -1,18 +1,25 @@
 import React from "react";
 import { ModelResource, SceneEffects, sceneEffects } from "./schema";
 import { lookPresets, neutralLook, type ModelLook } from "./model-look";
+import { EffectGraphControls } from "./EffectGraphControls";
+import { AppearancePresetControls } from "./AppearancePresetControls";
+import type { EffectGraph } from "./effect-graph";
 export function ModelPreprocessPanel({
   resource,
   instances,
   original,
   onCompare,
   onChange,
+  onGraphPreview,
+  onOpenGraph,
 }: {
   resource?: ModelResource;
   instances: readonly string[];
   original: boolean;
   onCompare: (value: boolean) => void;
   onChange: (value: NonNullable<ModelResource["preprocess"]>) => void;
+  onGraphPreview: (graph?: EffectGraph, output?: string) => void;
+  onOpenGraph: () => void;
 }) {
   if (!resource)
     return <p className="empty-state">先导入或选择一个模型素材。</p>;
@@ -32,6 +39,11 @@ export function ModelPreprocessPanel({
         <button aria-pressed={!original} onClick={() => onCompare(false)}>处理后</button>
         <button aria-pressed={original} onClick={() => onCompare(true)}>查看原始</button>
       </div>
+      <button className="wide-button" onClick={onOpenGraph}>编辑素材预处理节点</button>
+      <EffectGraphControls key={resource.id} kind="post" graph={e.graph} legacy={e.stylize}
+        onChange={graph=>{set("graph",graph);onCompare(false);}} onPreview={onGraphPreview}/>
+      <AppearancePresetControls key={resource.id+":settings"} kind="model" data={{enabled,effects:e,look}}
+        apply={preset=>{onChange(preset);onCompare(false);}}/>
       <h3>素材精修</h3>
       <div className="shader-actions">
         {lookPresets.map(({ name, look }) => (

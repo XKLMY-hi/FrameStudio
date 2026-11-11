@@ -46,7 +46,7 @@ const choose=async(id,key,add=false)=>{
   await (baseline?row:row.locator(".curve-tree-name")).click({modifiers:add?["Control"]:[]});
 };
 const drag=async(x,y,dx,dy)=>{await p.mouse.move(x,y);await p.mouse.down();await p.mouse.move(x+dx,y+dy,{steps:9});await p.mouse.up()};
-const open=()=>click("关键帧",p.locator(".scene-transport"));
+const open=()=>click(baseline?"关键帧":"曲线",p.locator(".scene-transport"));
 const close=()=>p.getByTitle("关闭关键帧编辑器",{exact:true}).click();
 async function pickPoint(id){
   return p.evaluate(id=>{
@@ -71,7 +71,7 @@ try{
   assert.equal(await p.title(),baseline?"FrameStudio 2.5":patch||full?"FrameStudio 2.5.1":"FrameStudio "+version);
   if(patch){assert.equal(await p.evaluate(()=>theater.scene.name),"2.5 草稿保留");out.draftPreserved=true}
   const old=await p.evaluate(()=>theater.scene.models[0]?.modelId);
-  await p.locator('input[accept=".livemg,.l2dstudio"]').setInputFiles(path.join(root,"qa/场景灯光与模型预处理.livemg"));
+  await p.locator('input[accept=".livemgs,.livemg,.l2dstudio"]').setInputFiles(path.join(root,"qa/场景灯光与模型预处理.livemg"));
   await p.waitForFunction(old=>theater.ready&&theater.scene.models[0]?.modelId!==old&&theater.scene.layers.filter(l=>l.model).length===2&&theater.renderer.loading.size===0&&theater.scene.layers.filter(l=>l.model).every(l=>theater.renderer.nodes.get(l.id)?.runtime?.model),old,{timeout:90000});
   const ids=await p.evaluate(()=>theater.scene.layers.filter(l=>l.model).map(l=>l.id)),actor=ids[0];
   await p.evaluate(id=>{theater.seek(.75);theater.selectLayer(id)},actor);

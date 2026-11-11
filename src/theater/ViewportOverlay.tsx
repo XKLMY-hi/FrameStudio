@@ -147,7 +147,7 @@ export function ViewportOverlay({
         ))}
       </svg>
       {gizmo && center && (
-        <svg className="transform-gizmo" aria-label="变换控制器">
+        <svg className="transform-gizmo" data-layer-id={gizmo.id} aria-label="变换控制器">
           {gizmo.corners.map((p, i) => (
             <g
               key={i}
@@ -200,6 +200,7 @@ export function ViewportOverlay({
                         pointerEvents="stroke"
                       />
                       <path
+                        data-agent-anchor
                         d={a.ring}
                         fill="none"
                         stroke={color}
@@ -247,7 +248,7 @@ export function ViewportOverlay({
                       )}
                       {a.tip !== false && (
                         <>
-                          <circle cx={x} cy={y} r="14" fill="transparent" />
+                          <circle data-agent-anchor cx={x} cy={y} r="14" fill="transparent" />
                           {mode === "scale" ? (
                             <rect
                               x={x - 5}
@@ -294,7 +295,7 @@ export function ViewportOverlay({
               aria-label="等比缩放"
               onPointerDown={(e) => begin(e, "scale", "uniform", gizmo)}
             >
-              <circle cx={center.x} cy={center.y} r="15" fill="transparent" />
+              <circle data-agent-anchor cx={center.x} cy={center.y} r="15" fill="transparent" />
               <circle
                 cx={center.x}
                 cy={center.y}

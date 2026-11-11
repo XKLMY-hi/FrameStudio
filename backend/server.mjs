@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { unzipSync, zipSync, strToU8 } from "fflate";
 import { saveLivemg, openLivemg, volumeEnvelope } from "./livemg.mjs";
+import { agentBodyLimit, createShaderAgent } from "./shader-agent.mjs";
 const mime = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript",
@@ -99,17 +100,23 @@ export async function createStudioServer({
     exports = path.join(data, "exports"),
     jobs = new Map();
   const preferenceFile = path.join(data, "preferences.json");
+  const shaderAgent = createShaderAgent(data);
   const accents = ["mono", "blue", "violet", "rose"];
+  function normalizePreferences(value={}) {
+    return {appearance:["light","dark"].includes(value.appearance) ? value.appearance : "system",
+      accent:accents.includes(value.accent) ? value.accent : "mono",
+      autoSave:value.autoSave!==false,closeBehavior:["save","discard"].includes(value.closeBehavior)?value.closeBehavior:"ask",
+      previewQuality:[640,960,1440].includes(value.previewQuality)?value.previewQuality:960,
+      defaultFps:[24,25,30,50,60].includes(value.defaultFps)?value.defaultFps:30,
+      defaultDuration:[5,10,12,15,30,60].includes(value.defaultDuration)?value.defaultDuration:12,
+      autosaveDelay:[1.3,5,15,30].includes(value.autosaveDelay)?value.autosaveDelay:1.3,
+      defaultSnap:value.defaultSnap!==false,defaultAutoKey:value.defaultAutoKey===true,defaultGrid:value.defaultGrid!==false,
+      defaultExportFormat:["mp4","prores","webm","png"].includes(value.defaultExportFormat)?value.defaultExportFormat:"mp4",
+      embedCanvases:value.embedCanvases===true,embedSingle:value.embedSingle!==false};
+  }
   async function readPreferences() {
-    try {
-      const value = JSON.parse(await fs.readFile(preferenceFile, "utf8"));
-      return {
-        appearance: ["light", "dark"].includes(value?.appearance) ? value.appearance : "system",
-        accent: accents.includes(value?.accent) ? value.accent : "mono",
-      };
-    } catch {
-      return { appearance: "system", accent: "mono" };
-    }
+    try {return normalizePreferences(JSON.parse(await fs.readFile(preferenceFile,"utf8")));}
+    catch {return normalizePreferences();}
   }
   let preferenceWrites = Promise.resolve();
   await Promise.all(
@@ -219,6 +226,11 @@ export async function createStudioServer({
         !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.origin)
       )
         return send({ error: "仅允许本地应用请求" }, 403);
+      if (url.pathname === "/agent/shader") {
+        if (req.method !== "POST" || req.headers.origin || req.headers.authorization !== `Bearer ${shaderAgent.token}`)
+          return send({ error: "无效的着色器 MCP 会话" }, 401);
+        return send(await shaderAgent.agent(JSON.parse(await bytes(req, agentBodyLimit))));
+      }
       const authorized =
         url.searchParams.get("token") === token ||
         req.headers.authorization === `Bearer ${token}` ||
@@ -243,17 +255,16 @@ export async function createStudioServer({
           ffmpeg: await exists(ffmpeg),
           dataDir: data,
         });
+      if (url.pathname === "/api/shader-agent" && req.method === "POST")
+        return send(shaderAgent.editor(JSON.parse(await bytes(req, agentBodyLimit))));
       if (url.pathname === "/api/preferences") {
         if (req.method === "POST") {
-          const { appearance, accent } = JSON.parse(
-            (await bytes(req, 4096)).toString("utf8"),
-          );
-          if (!["light", "dark", "system"].includes(appearance))
-            return send({ error: "无效外观设置" }, 400);
-          if (accent !== undefined && !accents.includes(accent))
-            return send({ error: "无效强调色" }, 400);
-          const write = preferenceWrites.then(async () => {
-            const next = { appearance, accent: accent ?? (await readPreferences()).accent };
+          const values=JSON.parse((await bytes(req,4096)).toString("utf8"));
+          if(!values || typeof values!=="object" || Array.isArray(values) ||
+             (values.appearance!==undefined && !["light","dark","system"].includes(values.appearance)) ||
+             (values.accent!==undefined && !accents.includes(values.accent))) return send({error:"无效设置"},400);
+          const write=preferenceWrites.then(async()=>{
+            const next=normalizePreferences({...await readPreferences(),...values});
             const temp = preferenceFile + ".tmp";
             await fs.writeFile(temp, JSON.stringify(next), "utf8");
             await fs.rename(temp, preferenceFile);
@@ -320,7 +331,29 @@ export async function createStudioServer({
         }
         for (const entry of (legacy ? model.expressions : model.FileReferences?.Expressions) || [])
           if (entry) await asset(legacy ? entry.name : entry.Name, legacy ? entry.file : entry.File);
-        return send({ model, assets });
+        const textures=(legacy ? model.textures : model.FileReferences?.Textures) || [];
+        return send({model,assets,textures:textures.map((texture,index)=>{
+          const file=path.relative(modelRoot,path.resolve(parent,texture));
+          inside(modelRoot,file);
+          return {index,file:file.split(path.sep).join("/"),name:path.basename(file)};
+        })});
+      }
+      if(url.pathname==="/api/model-texture" && req.method==="POST") {
+        const png=await bytes(req,64*1024*1024);
+        if(png.length<33 || png.toString("hex",0,8)!=="89504e470d0a1a0a" || png.toString("ascii",12,16)!=="IHDR" ||
+           !png.readUInt32BE(16) || !png.readUInt32BE(20) || png.readUInt32BE(16)>8192 || png.readUInt32BE(20)>8192)
+          throw Error("贴图需要为 8192 像素以内的 PNG");
+        const id=randomUUID(),relative="media/model-edits/"+id+".png",dest=inside(data,relative);
+        await fs.mkdir(path.dirname(dest),{recursive:true});await fs.writeFile(dest,png);
+        return send({id,path:relative,kind:"image",name:"模型贴图副本",duration:0,width:png.readUInt32BE(16),height:png.readUInt32BE(20)});
+      }
+      if(url.pathname==="/api/model-motion" && req.method==="POST") {
+        const source=await bytes(req,8*1024*1024),motion=JSON.parse(source.toString("utf8"));
+        if(motion?.Version!==3 || !Array.isArray(motion.Curves) || motion.Curves.length!==motion.Meta?.CurveCount)
+          throw Error("动作文件无效");
+        const relative="media/model-edits/"+randomUUID()+".motion3.json",dest=inside(data,relative);
+        await fs.mkdir(path.dirname(dest),{recursive:true});await fs.writeFile(dest,source);
+        return send({path:relative});
       }
       if (url.pathname === "/api/media-import" && req.method === "POST") {
         const name = decodeURIComponent(
@@ -349,10 +382,12 @@ export async function createStudioServer({
       }
       if (url.pathname === "/api/scene-autosave" && req.method === "POST") {
         const p = await json(req);
-        await fs.writeFile(
-          path.join(data, "autosave-scene.json"),
-          JSON.stringify(p),
-        );
+        const autosave=path.join(data,"autosave-scene.json");
+        const temp=autosave+"."+randomUUID()+".tmp";
+        try {
+          await fs.writeFile(temp,JSON.stringify(p));
+          await fs.rename(temp,autosave);
+        } finally {await fs.rm(temp,{force:true}).catch(()=>{});}
         return send({ ok: true });
       }
       if (url.pathname === "/api/scene-autosave")
@@ -582,7 +617,7 @@ export async function createStudioServer({
           const zip = await saveLivemg(
             input.project || input,
             data,
-            input.thumbnail,
+            input.thumbnail,input.options,
           );
           res.writeHead(200, { "Content-Type": "application/zip" });
           return res.end(zip);
@@ -740,7 +775,7 @@ export async function createStudioServer({
         let n = 0,
           filters = [],
           labels = [];
-        for (const a of job.format === "gif" ? [] : job.audio || []) {
+        for (const a of ["gif","png"].includes(job.format) ? [] : job.audio || []) {
           if (!a.path) continue;
           n++;
           if (a.loop) args.push("-stream_loop", "-1");
@@ -937,6 +972,11 @@ export async function createStudioServer({
   server.listen(port, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
+  try {
+    await shaderAgent.listen(address.port);
+  } catch (err) {
+    console.error("Shader MCP discovery:", err.message);
+  }
   return {
     server,
     port: address.port,

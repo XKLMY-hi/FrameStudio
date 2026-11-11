@@ -10,9 +10,13 @@ import { buildPropertyCatalog } from "./property-catalog";
 import { CurveChannelTree } from "./CurveChannelTree";
 import { curveGeometry, diamond, segmentAt } from "./curve-geometry";
 import { clipById } from "./properties";
+import { download } from "../api";
+import { applyEase, curveFile, importCurveFile, segmentEase } from "./curve-file";
 
+export type AgentCurveSelection = {binding:Binding;bindings:Binding[];index?:number;segment?:boolean};
 type Props = {
   scene: Scene;
+  parameterOnly?: boolean;
   binding: Binding;
   paramsByLayer: Record<string, Param[]>;
   seed?: Binding;
@@ -26,6 +30,7 @@ type Props = {
   record: (b: Binding) => void;
   editClip: (id: string, patch: Partial<SceneClip>) => void;
   close: () => void;
+  agentSelection?: React.RefObject<AgentCurveSelection|undefined>;
 };
 const colors = [
   "var(--primary)",
@@ -39,6 +44,8 @@ const clone = (keys: Key[]) => structuredClone(keys);
 const fmt = (x: number) => Number(x.toFixed(4));
 
 export function CurveWorkspace(p: Props) {
+  const curveImport = useRef<HTMLInputElement>(null);
+  const [importError,setImportError] = useState("");
   const id = p.seed ? bindingId(p.seed) : undefined,
     plot = useRef<SVGSVGElement>(null);
   const [chosen, setChosen] = useState<string[]>(id ? [id] : []);
@@ -55,8 +62,8 @@ export function CurveWorkspace(p: Props) {
   const [size, setSize] = useState({ w: 720, h: 280 });
   const [range, setRange] = useState<[number, number]>([0, p.scene.duration]);
   const catalog = useMemo(
-    () => buildPropertyCatalog(p.scene, p.paramsByLayer),
-    [p.scene, p.paramsByLayer],
+    () => buildPropertyCatalog(p.scene, p.paramsByLayer, p.parameterOnly),
+    [p.scene, p.paramsByLayer, p.parameterOnly],
   );
   useEffect(() => {
     setChosen(id ? [id] : []);
@@ -137,6 +144,12 @@ export function CurveWorkspace(p: Props) {
       : clipSource;
   const asset = clip && p.scene.assets.find((a) => a.id === clip.assetId);
   const key = focus && active?.keys[focus.index];
+  useEffect(()=>{
+    const selection=p.agentSelection;
+    if (!selection) return;
+    selection.current=active ? {binding:active.b,bindings:visible.map(({layerId,channel,clipId})=>({layerId,channel,clipId})),index:focus?.index,segment:focus?.segment} : undefined;
+    return ()=>{selection.current=undefined;};
+  },[p.agentSelection,active?.id,focus,visible]);
   const L = 57,
     T = 23,
     R = 13,
@@ -384,6 +397,36 @@ export function CurveWorkspace(p: Props) {
             </button>
           ))}
         </div>
+        <details className="curve-file-menu">
+          <summary>曲线 JSON ▾</summary>
+          <div className="popup-menu">
+            <button disabled={!active} onClick={()=>curveImport.current?.click()}>导入曲线或缓动</button>
+            <button disabled={!active?.keys.length} onClick={()=>{
+              if (!active) return;
+              const data = curveFile("keys",active.b.name,active.keys);
+              download(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),"FrameStudio.fscurve.json");
+            }}>导出属性关键帧</button>
+            <button disabled={!active || selectedSegment===undefined} onClick={()=>{
+              if (!active || selectedSegment===undefined) return;
+              try {
+                const data = curveFile("ease",active.b.name,segmentEase(active.keys,selectedSegment));
+                download(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),"FrameStudio.fscurve.json");
+                setImportError("");
+              } catch(err) {setImportError((err as Error).message);}
+            }}>导出选中段为缓动</button>
+            {importError && <small role="alert">{importError}</small>}
+          </div>
+          <input ref={curveImport} type="file" accept=".json" aria-label="曲线 JSON 文件" hidden onChange={async e=>{
+            const file=e.currentTarget.files?.[0];e.currentTarget.value="";
+            if (!active || !file) return;
+            try {
+              if (file.size>524288) throw Error("曲线文件最多 512 KB");
+              const data=importCurveFile(await file.text());
+              change(active,data.kind==="keys" ? data.keys : applyEase(active.keys,selectedSegment??-1,data.keys));
+              setImportError("");
+            } catch(err) {setImportError((err as Error).message);}
+          }}/>
+        </details>
         <button title="关闭关键帧编辑器" onClick={p.close}>
           <ArrowLeft size={14} /> 返回时间线
         </button>

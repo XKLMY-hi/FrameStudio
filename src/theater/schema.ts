@@ -12,6 +12,10 @@ import {
 import type { TextAnimation, TitleMotion } from "./text-motion";
 import type { ShaderRecipe } from "./stylize";
 import type { ModelLook } from "./model-look";
+import type { EffectGraph } from "./effect-graph";
+import type { CodeShader } from "../../backend/shader-format.mjs";
+import { currentPostGraph } from "./agent-graph";
+import type { Shape } from "./shape";
 export type Transform = {
   x: number;
   y: number;
@@ -29,6 +33,9 @@ export type SceneEffects = Effects & {
   bokeh?: number;
   stylize?: ShaderRecipe;
   stylizeMix?: number;
+  graph?: EffectGraph;
+  graphValues?: Record<string,number>;
+  codeShader?: CodeShader;
 };
 export type MediaAsset = {
   id: string;
@@ -43,7 +50,18 @@ export type MediaAsset = {
   analysis?: string;
   fontFamily?: string;
 };
+export type ModelControl = {
+  id:string;
+  name:string;
+  x:number;
+  y:number;
+  xParam:string;
+  yParam:string;
+  parentId?:string;
+};
 export type ModelResource = {
+  controls?:ModelControl[];
+  textureOverrides?:Record<number,string>;
   id: string;
   name: string;
   modelId: string;
@@ -106,6 +124,7 @@ export type Layer = {
   surface?: { roughness: number; specular: number; rim: number; bump: number };
   assetId?: string;
   color?: string;
+  shape?: Shape;
   text?: {
     value: string;
     fontFamily: string;
@@ -120,6 +139,7 @@ export type Layer = {
     exit?: TitleMotion;
     exitDuration?: number;
     motionAmount?: number;
+    graph?: EffectGraph;
   };
   model?: {
     resourceId: string;
@@ -176,6 +196,8 @@ export type Scene = {
   layers: Layer[];
   tracks: SceneTrack[];
   camera: Camera;
+  outputShader?: CodeShader;
+  outputGraph?: EffectGraph;
   depthOcclusion?: boolean;
   lighting?: {
     enabled: boolean;
@@ -333,8 +355,8 @@ export function addVisual(
   tr.clips.push(sceneClip("visual", l.id, l.id, l.name, start, duration));
 }
 export function migrateScene(p: Scene | Project): Scene {
-  if (p.version === 2)
-    return {
+  if (p.version === 2) {
+    const s = {
       ...p,
       tracks: p.tracks.flatMap((t) =>
         t.clips.length > 1
@@ -342,6 +364,20 @@ export function migrateScene(p: Scene | Project): Scene {
           : [t],
       ),
     };
+    if (s.outputShader) {
+      try { s.outputGraph = currentPostGraph(s,"output"); delete s.outputShader; } catch {}
+    }
+    if (p.layers.some(l => l.effects.codeShader))
+      s.layers = p.layers.map(l => {
+        if (!l.effects.codeShader) return l;
+        try {
+          const effects = { ...l.effects, graph:currentPostGraph(p,l.id) };
+          delete effects.codeShader;
+          return {...l,effects};
+        } catch { return l; }
+      });
+    return s;
+  }
   const s = emptyScene();
   Object.assign(s, {
     name: p.name,

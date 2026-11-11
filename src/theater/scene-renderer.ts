@@ -15,6 +15,13 @@ import { depthOrder, planeQuad, type DepthPolygon } from "./depth-order";
 import { titlePose } from "./text-motion";
 import { lookFragment, neutralLook } from "./model-look";
 import { shaderOpIndex, stylizeFragment, validateShaderRecipe, type ShaderRecipe } from "./stylize";
+import { graphOrder, type EffectGraph } from "./effect-graph";
+import { checkedGraph, graphFilter } from "./effect-graph-shader";
+import { GraphText } from "./effect-graph-text";
+import { CodeShaderRuntime } from "./code-shader";
+import { HybridGraphRuntime } from "./hybrid-graph";
+import { shapeSvg } from "./shape";
+import type { CodeShader } from "../../backend/shader-format.mjs";
 import type { GizmoAxis, OverlayFrame } from "./ViewportOverlay";
 import { pivotOf, selectionRoots } from "./viewport-selection";
 import { clippedStroke, planeRay } from "./view-occlusion";
@@ -41,6 +48,7 @@ import {
   textAt,
   visualClip,
   localLayerTime,
+  sampleKeys,
   worldMatrix,
 } from "./scene-engine";
 const neutralPreprocess = sceneEffects();
@@ -69,6 +77,9 @@ type Node = {
   rt?: any;
   runtime?: StudioRenderer;
   texture?: any;
+  shapeTexture?: any;
+  shapeKey?: string;
+  shapeLoad?: Promise<void>;
   text?: any;
   textKey?: string;
   textFrame?: string;
@@ -85,6 +96,9 @@ type Node = {
   blur?: any;
   lens?: any;
   stylizers?: any[];
+  graphFilter?: ReturnType<typeof graphFilter>;
+  graphText?: GraphText;
+  graphPreview?: string;
   lookFilter?: any;
   group?: any;
   wrap?: any;
@@ -105,6 +119,8 @@ export type ViewSnapshot = {
   hits: Hit[];
   pickHits: Hit[];
   projection: ReturnType<typeof outputProjection>;
+  frame: {x:number;y:number;w:number;h:number};
+  spatial: boolean;
 };
 export type MirrorView = {
   host: HTMLElement;
@@ -124,6 +140,11 @@ type Surface = {
   alpha: number;
 };
 export class SceneRenderer {
+  graphPreview?: { source: EffectGraph; output: string };
+  shaderPreview?: { sceneId: string; target: string; graph: EffectGraph };
+  readonly codeShaders: CodeShaderRuntime;
+  private readonly hybrid: HybridGraphRuntime;
+  private effectSize = [1, 1];
   private effectTime = 0;
   app: any;
   host: HTMLElement;
@@ -177,6 +198,9 @@ export class SceneRenderer {
   exportBackground?: string;
   exportFill: any;
   exactFrame = false;
+  private compositeTexture?: any;
+  private compositeSprite?: any;
+  private compositeSource?: HTMLCanvasElement;
   constructor(host: HTMLElement) {
     this.host = host;
     const P = window.PIXI;
@@ -190,6 +214,8 @@ export class SceneRenderer {
       preserveDrawingBuffer: true,
     });
     this.app.stop();
+    this.codeShaders = new CodeShaderRuntime(this.app.renderer);
+    this.hybrid = new HybridGraphRuntime(this.codeShaders);
     host.append(this.app.view);
     this.app.view.setAttribute("aria-label", "小剧场场景画布");
     this.matte = new P.Container();
@@ -371,9 +397,15 @@ export class SceneRenderer {
       )
     );
   }
-  async ensure(s: Scene) {
+  private resourceQueue=Promise.resolve();
+  ensure(s:Scene,retain?:Scene) {
+    const task=this.resourceQueue.then(()=>this.ensureResources(s,retain));
+    this.resourceQueue=task.catch(()=>{});
+    return task;
+  }
+  private async ensureResources(s: Scene, retain?: Scene) {
     const P = window.PIXI;
-    const ids = new Set(s.layers.map((l) => l.id));
+    const ids = new Set([...s.layers,...(retain?.layers ?? [])].map((l) => l.id));
     for (const [id, n] of this.nodes)
       if (
         !ids.has(id) &&
@@ -383,6 +415,7 @@ export class SceneRenderer {
         )
       ) {
         n.runtime?.destroy();
+        n.shapeTexture?.destroy(true);
         n.mesh?.destroy({ children: false });
         n.rt?.destroy(true);
         n.depthRT?.destroy(true);
@@ -396,11 +429,14 @@ export class SceneRenderer {
         n.blur?.destroy();
         n.lens?.destroy();
         for (const filter of n.stylizers ?? []) filter.destroy();
+        n.graphFilter?.filter.destroy();
+        n.graphText?.destroy();
         n.pre?.filter?.destroy();
         n.pre?.blur?.destroy();
         n.pre?.lens?.destroy();
         n.pre?.lookFilter?.destroy();
         for (const filter of n.pre?.stylizers ?? []) filter.destroy();
+        n.pre?.graphFilter?.filter.destroy();
         n.gizmoText?.destroy();
         this.nodes.delete(id);
       }
@@ -414,7 +450,12 @@ export class SceneRenderer {
         if (l.kind === "model" && l.model) {
           const resource = s.models.find((r) => r.id === l.model!.resourceId);
           if (!resource) return;
-          const source = resource.modelId + "/" + resource.file;
+          const path=resource.modelId+"/"+resource.file;
+          const textures=Object.fromEntries(Object.entries(resource.textureOverrides??{}).flatMap(([index,id])=>{
+            const asset=s.assets.find(a=>a.id===id && a.kind==="image");
+            return asset ? [[index,new URL(media(asset.path),location.href).href]] : [];
+          }));
+          const source=path+"|"+JSON.stringify(textures);
           if (n.source !== source && !this.loading.has(l.id)) {
             this.loading.add(l.id);
             try {
@@ -422,7 +463,7 @@ export class SceneRenderer {
               const r = new StudioRenderer(undefined, this.app);
               n.runtime = r;
               await r.load(
-                new URL(media("models/" + source), location.href).href,
+                new URL(media("models/" + path), location.href).href,textures,
               );
               n.defaults = r.params.map((p) => p.default);
               n.source = source;
@@ -441,6 +482,27 @@ export class SceneRenderer {
             n.texture = await P.Texture.fromURL(media(a.path));
             this.invalidate();
           }
+        }
+        if (l.kind==="color" && l.shape) {
+          const key=JSON.stringify([l.shape,l.width,l.height]);
+          const node=n, shape=l.shape;
+          if(node.shapeKey!==key) {
+            node.shapeKey=key;
+            node.shapeLoad=(async()=>{
+              const image=new Image();
+              image.src="data:image/svg+xml;charset=utf-8,"+encodeURIComponent(shapeSvg(shape,l.width,l.height));
+              await image.decode();
+              if(node.shapeKey!==key || this.nodes.get(l.id)!==node) return;
+              node.shapeTexture?.destroy(true);
+              node.shapeTexture=P.Texture.from(image);
+              this.invalidate();
+            })().catch(e=>{
+              if(node.shapeKey!==key || this.nodes.get(l.id)!==node) return;
+              node.shapeKey=undefined;
+              throw e;
+            });
+          }
+          await node.shapeLoad;
         }
       }),
     );
@@ -587,7 +649,15 @@ export class SceneRenderer {
       });
       filters.push(n.lens);
     }
-    const recipe = checkedRecipe(e.stylize);
+    const checked = checkedGraph(e.graph);
+    const graph = checked?.kind === "post" ? checked : null;
+    const output = (!this.exactFrame && this.graphPreview?.source === e.graph ? this.graphPreview?.output : undefined) ?? graph?.output;
+    const order = graph && output ? graphOrder(graph,output) : [];
+    const recipe = graph
+      ? order.length && order.every(node => node.op === "legacy")
+        ? { name:graph.name, passes:order.map(node => node.inputs.pass as ShaderRecipe["passes"][number]) }
+        : null
+      : checkedRecipe(e.stylize);
     const mix = Math.min(1, Math.max(0, (Number.isFinite(e.stylizeMix) ? e.stylizeMix! : 1) * strength));
     if (recipe && mix > 0) {
       n.stylizers ??= [];
@@ -604,6 +674,16 @@ export class SceneRenderer {
         filters.push(filter);
       });
     }
+    if (graph && output && output !== "$source" && !recipe && mix > 0) {
+      if (order.some(node => node.op === "glsl"))
+        filters.push(this.hybrid.filter(n,graph,output,this.effectTime,mix,scale,this.effectSize,e.graphValues));
+      else {
+        n.graphFilter = graphFilter(n.graphFilter,graph,output,this.effectTime,mix,scale,e.graphValues);
+        filters.push(n.graphFilter.filter);
+      }
+    }
+    const shader = this.codeShaders.filter(n, e.codeShader, this.effectTime, this.effectSize[0], this.effectSize[1], strength);
+    if (shader) filters.push(shader);
     return filters.length ? filters : null;
   }
   poseModel(
@@ -661,7 +741,8 @@ export class SceneRenderer {
         ? neutralPreprocess
         : resource?.preprocess?.effects || neutralPreprocess;
     const look = resource?.preprocess?.enabled === false ? undefined : resource?.preprocess?.look;
-    const preChanged = n.preprocess !== resource?.preprocess;
+    const graphPreview = !exact && this.graphPreview?.source === preprocessing.graph ? this.graphPreview?.output : undefined;
+    const preChanged = n.preprocess !== resource?.preprocess || n.graphPreview !== graphPreview;
     if (resized) {
       n.rt?.destroy(true);
       n.rt = window.PIXI.RenderTexture.create({
@@ -704,6 +785,7 @@ export class SceneRenderer {
       r.stage.filterArea = new window.PIXI.Rectangle(0, 0, w, h);
       this.app.renderer.render(r.stage, { renderTexture: n.rt, clear: true });
       n.preprocess = resource?.preprocess;
+      n.graphPreview = graphPreview;
     }
     return n.rt;
   }
@@ -711,7 +793,8 @@ export class SceneRenderer {
     const P = window.PIXI,
       value = textAt(s, l, t),
       style = l.text!,
-      key = JSON.stringify([value, style, l.width, l.height]);
+      {graph: graphDefinition,...textStyle} = style,
+      key = JSON.stringify([value, textStyle, l.width, l.height]);
     if (n.textKey !== key) {
       if (!n.text) {
         n.text = new P.Text("", {});
@@ -745,9 +828,23 @@ export class SceneRenderer {
       n.textFrame = undefined;
     }
     const clip = visualClip(s, l.id, t);
+    const local = localLayerTime(s,l,t);
+    const remaining = clip ? (clip.start + clip.duration - t) * Math.abs(clip.speed) : Infinity;
+    const graph = checkedGraph(graphDefinition);
+    if (graph?.kind === "text") {
+      const overrides = Object.fromEntries(Object.entries(graph.parameters).map(([id,p]) =>
+        [id,sampleKeys(l.animation["textGraph."+id],local,p.value)]));
+      const output = (!this.exactFrame && this.graphPreview?.source === style.graph ? this.graphPreview?.output : undefined) ?? graph.output;
+      n.graphText ??= new GraphText();
+      return n.graphText.render(this.app.renderer,n.rt,graph,output,key,value,n.text.style,l.width,l.height,local,remaining,overrides);
+    }
+    if (n.graphText) {
+      n.graphText.destroy();
+      n.graphText = undefined;
+      n.textFrame = undefined;
+    }
     const pose = titlePose(
-      style.animation, style.exit, localLayerTime(s, l, t),
-      clip ? (clip.start + clip.duration - t) * Math.abs(clip.speed) : Infinity,
+      style.animation, style.exit, local, remaining,
       style.fontSize, style.entranceDuration, style.exitDuration, style.motionAmount,
     );
     const frame = JSON.stringify(pose);
@@ -793,21 +890,25 @@ export class SceneRenderer {
     this.app.renderer.render(n.textGroup, { renderTexture: n.rt, clear: true });
     return n.rt;
   }
-  renderAt(s: Scene, t: number, exact = false) {
+  renderAt(s: Scene, t: number, exact = false, capture = false, omitShaderDraft = false,
+    output?: {maxEdge?:number;composite?:HTMLCanvasElement}) {
     const source = s;
     const audition =
-      !exact && s.id !== "@preprocessing" ? this.motionPreview : undefined;
+      !exact && !capture && !output && s.id !== "@preprocessing" ? this.motionPreview : undefined;
     if (audition?.stage) s = audition.stage;
     const orbit =
-      !exact && s.id !== "@preprocessing" ? this.viewportOrbit : undefined;
+      !exact && !capture && !output && s.id !== "@preprocessing" ? this.viewportOrbit : undefined;
     this.exactFrame = exact;
     this.effectTime = t;
+    this.effectSize = [s.width, s.height];
+    const shaderPreview = !exact && !omitShaderDraft && this.shaderPreview?.sceneId === source.id ? this.shaderPreview : undefined;
     const P = window.PIXI;
     let w: number, h: number, scale: number, cx: number, cy: number;
-    if (exact) {
-      w = s.width;
-      h = s.height;
-      scale = 1;
+    if (exact || capture || output) {
+      const limit=output?.maxEdge ?? (capture ? 360 : Infinity);
+      scale = Math.min(1, limit / Math.max(s.width, s.height));
+      w = Math.max(1, Math.round(s.width * scale));
+      h = Math.max(1, Math.round(s.height * scale));
       cx = w / 2;
       cy = h / 2;
     } else {
@@ -819,13 +920,13 @@ export class SceneRenderer {
       w = Math.max(1, Math.round(rect.width * res));
       h = Math.max(1, Math.round(rect.height * res));
       scale =
-        Math.min((w - 60 * res) / s.width, (h - 60 * res) / s.height) *
+        Math.max(0.001,Math.min((w - 60 * res) / s.width, (h - 60 * res) / s.height)) *
         (orbit ? 1 : this.view.zoom);
       cx = w / 2 + (orbit ? 0 : this.view.panX * res);
       cy = h / 2 + (orbit ? 0 : this.view.panY * res);
     }
     const [bufferW, bufferH] =
-      !exact && this.sharedBuffer ? this.sharedBuffer : [w, h];
+      !exact && !output && this.sharedBuffer ? this.sharedBuffer : [w, h];
     if (this.app.screen.width !== bufferW || this.app.screen.height !== bufferH)
       this.app.renderer.resize(bufferW, bufferH);
     this.app.stage.scale.set(bufferW / w, bufferH / h);
@@ -836,7 +937,7 @@ export class SceneRenderer {
       w: s.width * scale,
       h: s.height * scale,
     };
-    this.matte.visible = !exact && !orbit;
+    this.matte.visible = !exact && !capture && !output && !orbit;
     this.exportFill.clear();
     this.exportFill.visible = exact && !!this.exportBackground;
     if (this.exportFill.visible)
@@ -844,7 +945,7 @@ export class SceneRenderer {
         .beginFill(parseInt(this.exportBackground!.slice(1), 16), 1)
         .drawRect(0, 0, w, h)
         .endFill();
-    this.guides.visible = !exact;
+    this.guides.visible = !exact && !capture && !output;
     this.checker.position.set(this.frame.x, this.frame.y);
     this.checker.width = this.frame.w;
     this.checker.height = this.frame.h;
@@ -1046,6 +1147,7 @@ export class SceneRenderer {
         const l = animatedLayer(s, original, t),
           n = this.nodes.get(l.id);
         if (!n) continue;
+        const effects = shaderPreview?.target === l.id ? { ...l.effects, graph: shaderPreview.graph, codeShader: undefined } : l.effects;
         const alpha = layerAlpha(s, original, t);
         if (alpha <= 0) continue;
         if (l.kind === "adjustment") {
@@ -1053,7 +1155,7 @@ export class SceneRenderer {
           if (!n.wrap) n.wrap = new P.Container();
           n.wrap.removeChildren();
           n.wrap.addChild(container);
-          n.wrap.filters = this.effects(n, l.effects, alpha, scale);
+          n.wrap.filters = this.effects(n, effects, alpha, scale);
           n.wrap.filterArea = new P.Rectangle(0, 0, bufferW, bufferH);
           const next = new P.Container();
           next.addChild(n.wrap);
@@ -1063,7 +1165,7 @@ export class SceneRenderer {
         if (l.kind === "group") {
           flush();
           const child = compose(l.id, new Set([...seen, l.id]));
-          child.filters = this.effects(n, l.effects, 1, scale);
+          child.filters = this.effects(n, effects, 1, scale);
           child.filterArea = new P.Rectangle(0, 0, bufferW, bufferH);
           container.addChild(child);
           continue;
@@ -1082,6 +1184,7 @@ export class SceneRenderer {
           );
         else if (l.kind === "image") texture = n.texture;
         else if (l.kind === "text") texture = this.textTexture(n, l, s, t);
+        else if (l.kind === "color" && l.shape) texture=n.shapeTexture;
         else if (l.kind === "color") {
           if (!n.texture || n.source !== l.color) {
             n.texture = P.Texture.WHITE;
@@ -1113,9 +1216,9 @@ export class SceneRenderer {
           uPlaneUp: normalize(matrix.slice(4, 7)),
         });
         mesh.tint =
-          l.kind === "color" ? P.utils.string2hex(l.color || "#fff") : 0xffffff;
+          l.kind === "color" && !l.shape ? P.utils.string2hex(l.color || "#fff") : 0xffffff;
         // A premultiplied color texture carries its own tint; generic mesh shaders do not use Sprite tint.
-        if (l.kind === "color") {
+        if (l.kind === "color" && !l.shape) {
           if (!n.graphic || n.graphic._color !== l.color) {
             const cv = document.createElement("canvas");
             cv.width = cv.height = 2;
@@ -1135,7 +1238,7 @@ export class SceneRenderer {
         }[l.blend];
         mesh.filters = this.effects(
           n,
-          l.effects,
+          effects,
           1,
           scale,
           spatial && !orbit ? dofBlur(matrix[14], camera) : 0,
@@ -1170,9 +1273,43 @@ export class SceneRenderer {
       flush();
       return container;
     };
-    this.composition.addChild(compose(null));
+    if (output?.composite) {
+      if (this.compositeSource!==output.composite) {
+        this.compositeTexture?.destroy(true);
+        this.compositeTexture=P.Texture.from(output.composite);
+        this.compositeSource=output.composite;
+      }
+      this.compositeTexture.baseTexture.update();
+      this.compositeSprite ??= new P.Sprite();
+      this.compositeSprite.texture=this.compositeTexture;
+      this.compositeSprite.position.set(-s.width/2,-s.height/2);
+      this.compositeSprite.width=s.width;
+      this.compositeSprite.height=s.height;
+      this.composition.addChild(this.compositeSprite);
+    } else this.composition.addChild(compose(null));
+    const frameX = bufferW / w, frameY = bufferH / h;
+    const frame = this.frame;
+    const draft = shaderPreview?.target === "output" ? shaderPreview.graph : undefined;
+    const outputGraph = checkedGraph(draft ?? source.outputGraph);
+    const graphOutput = (!exact && this.graphPreview?.source === (draft ?? source.outputGraph) ? this.graphPreview?.output : undefined) ?? outputGraph?.output;
+    const resolution = exact ? 1 : Math.min(1, this.previewLimit / Math.max(frame.w * frameX, frame.h * frameY));
+    let finalFilter = null;
+    if (!orbit && s.id !== "@preprocessing" && scale > 0) {
+      if (outputGraph?.kind === "post" && graphOutput && graphOutput !== "$source") {
+        finalFilter = this.hybrid.filter(this.composition,outputGraph,graphOutput,t,1,scale,this.effectSize);
+        finalFilter.autoFit = false;
+        finalFilter.resolution = resolution;
+        finalFilter.padding = 0;
+      } else if (!draft) {
+        finalFilter = this.codeShaders.filter(this.composition,source.outputShader,t,s.width,s.height,1,false,resolution);
+      }
+    }
+    this.composition.filters = finalFilter ? [finalFilter] : null;
+    this.composition.filterArea = finalFilter
+      ? new P.Rectangle(frame.x * frameX, frame.y * frameY, frame.w * frameX, frame.h * frameY)
+      : null;
     this.guides.clear();
-    if (!exact) {
+    if (!exact && !capture && !output) {
       if (!orbit)
         this.guides
           .lineStyle(1, this.dark ? 0x999999 : 0x707070, 0.8)
@@ -1508,6 +1645,8 @@ export class SceneRenderer {
       hits: this.hits,
       pickHits: this.pickHits,
       projection: view,
+      frame: this.frame,
+      spatial: !!orbit,
     };
     this.lastScene = source;
     this.lastT = t;
@@ -1560,17 +1699,51 @@ export class SceneRenderer {
       ),
     );
   }
+  captureShaderPreview(scene: Scene, t: number, omitShaderDraft = false) {
+    try {
+      this.renderAt(scene, t, false, true, omitShaderDraft);
+      return this.app.view.toDataURL("image/jpeg", 0.78) as string;
+    } finally {
+      this.invalidate();
+    }
+  }
+  probePostGraph(graph: EffectGraph) {
+    for (const node of graph.nodes)
+      if (node.op === "glsl") this.codeShaders.probe(node.inputs.shader as CodeShader);
+    if (graph.output === "$source") return;
+    const P = window.PIXI;
+    const sprite = new P.Sprite(P.Texture.WHITE);
+    const surface = P.RenderTexture.create({ width: 32, height: 24 });
+    sprite.width = 32;
+    sprite.height = 24;
+    try {
+      sprite.filters = [this.hybrid.filter(sprite,graph,graph.output,0,1,1,[32,24])];
+      this.app.renderer.render(sprite,{renderTexture:surface,clear:true});
+      this.app.renderer.extract.pixels(surface);
+    } finally {
+      sprite.destroy();
+      surface.destroy(true);
+      this.invalidate();
+    }
+  }
   destroy() {
     for (const n of this.nodes.values()) {
+      n.shapeTexture?.destroy(true);
       n.runtime?.destroy();
       n.rt?.destroy(true);
+      n.graphFilter?.filter.destroy();
+      n.pre?.graphFilter?.filter.destroy();
+      n.graphText?.destroy();
       n.depthRT?.destroy(true);
       for (const piece of n.depthMeshes || []) piece?.mesh.destroy();
       n.mirrorDepth?.depthRT?.destroy(true);
       for (const piece of n.mirrorDepth?.depthMeshes || [])
         piece?.mesh.destroy();
     }
+    this.compositeTexture?.destroy(true);
+    this.compositeSprite?.destroy();
     this.maskRT?.destroy(true);
+    this.codeShaders.destroy();
     this.app.destroy(true);
   }
 }

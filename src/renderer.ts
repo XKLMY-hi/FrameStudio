@@ -8,6 +8,7 @@ declare global {
     Live2DCubismCore: any;
     studioDesktop?: {
       setAppearance?: (appearance:string)=>void;
+      onSaveBeforeClose?:(save:()=>Promise<void>)=>()=>void;
       reveal: (p: string) => Promise<void>;
       saveFile?: (
         name: string,
@@ -130,12 +131,18 @@ export class StudioRenderer {
     if (host) host.append(this.app.view);
     this.app.view.setAttribute("aria-label", "Live2D 透明画布");
   }
-  async load(url: string) {
+  async load(url: string,textures:Record<number,string>={}) {
     const seq = ++this.loadSequence,
       P = window.PIXI;
-    const settings = await fetch(url).then((r) => r.json());
+    const response=await fetch(url);
+    if(!response.ok) throw Error("无法读取模型描述文件");
+    const settings=await response.json();
     const adapter = isCubism2File(url) ? await cubism2() : undefined;
-    const source = adapter ? cubism2Settings(adapter, settings, url) : url;
+    const source = adapter ? cubism2Settings(adapter,settings,url) :
+      new P.live2d.Cubism4ModelSettings({...settings,url});
+    if(Object.keys(textures).length) {
+      source.textures=source.textures.map((ref:string,index:number)=>textures[index]??ref);
+    }
     if (!adapter && !P.live2d?.Live2DModel)
       throw Error("未找到新版 Live2D Cubism Core 运行库");
     if (!adapter) this.memoryGuard ??= cubismMemoryGuard(window.Live2DCubismCore);

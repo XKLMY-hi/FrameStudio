@@ -130,6 +130,7 @@ test(".livemg packs unique models and media, remaps on reopen, rejects damaged o
     1,
   );
   const opened = await openLivemg(bytes, dir);
+  assert.equal(opened.format,"livemg");
   assert.notEqual(opened.models[0].modelId, "demo");
   assert.equal(opened.models[0].modelId, opened.models[1].modelId);
   assert.notEqual(opened.assets[0].path, "media/a.wav");

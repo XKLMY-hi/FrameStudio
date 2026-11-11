@@ -15,7 +15,8 @@ version = json.loads((root / "package.json").read_text(encoding="utf-8"))["versi
 source = release / f"FrameStudio-{version}-portable"
 app = source / "resources" / "app"
 baseline = release / f"FrameStudio-{args.baseline}-portable" / "resources" / "app"
-documents = ("使用说明.md", "第三方组件说明.md", "SHADERS.md", "examples/iris-film.fshader.json")
+documents = ("使用说明.md", "第三方组件说明.md", "SHADERS.md", "examples/iris-film.fshader.json",
+             "examples/stage-bloom.fsglsl.json")
 brand_files = sorted(file for file in (source / "docs" / "brand").rglob("*") if file.is_file())
 
 portable_files = sorted(file for file in source.rglob("*") if file.is_file())
@@ -23,7 +24,7 @@ if not (source / "FrameStudio.exe").is_file():
     parser.error(f"Portable build not found: {source}")
 
 asset_extensions = (
-    ".zip", ".livemg", ".l2dstudio", ".moc", ".moc3", ".model3.json", ".motion3.json",
+    ".zip", ".livemg", ".livemgs", ".l2dstudio", ".moc", ".moc3", ".model3.json", ".motion3.json",
     ".physics3.json", ".exp3.json", ".pose3.json", ".cdi3.json", ".userdata3.json",
     ".mtn", ".model.json", ".physics.json", ".exp.json", ".pose.json",
 )
@@ -37,6 +38,8 @@ for file in portable_files:
         parts[:3] == ("resources", "app", "data")
         or file.name.casefold().endswith(asset_extensions)
         or file.name.casefold() in {"model.json", "live2d.min.js"}
+        or file.name.casefold() in {"agent-config.json", "agent-vault.json"}
+        or file.name.casefold().startswith("agent-config.json.")
         or file.name.casefold() in local_previews
     ):
         parser.error(f"Remove local assets from the public build: {relative}")

@@ -19,85 +19,128 @@ async function walk(root, prefix = "") {
   return out;
 }
 const hash = (v) => createHash("sha256").update(v).digest("hex");
-export async function saveLivemg(project, data, thumbnail) {
-  if (project.format !== "livemg" || project.version !== 2)
-    throw Error("无效的 .livemg 工程");
-  const files = { "project.json": strToU8(JSON.stringify(project)) };
-  const modelIds = [...new Set(project.models.map((m) => m.modelId))];
+function projectScenes(project) {
+  const single = p => p?.format === "livemg" && p.version === 2 &&
+    ["models","assets","layers","tracks"].every(key=>Array.isArray(p[key]));
+  if (single(project)) return [project];
+  if (project?.format === "framestudio-montage" && project.version === 1 &&
+      Array.isArray(project.canvases) && project.canvases.length>0 && project.canvases.length<=120 &&
+      Array.isArray(project.clips) && project.clips.length<=600 && project.canvases.every(c=>single(c?.scene)))
+    return project.canvases.map(c=>c.scene);
+  throw Error("工程格式或版本不支持");
+}
+export async function saveLivemg(project,data,thumbnail,options={}) {
+  const scenes=projectScenes(project);
+  if(project.format==="framestudio-montage" && options.container) {
+    const files=Object.create(null), seen=new Set();
+    const embedded=options.embedCanvases===true;
+    const refs=[];
+    for(const [i,canvas] of project.canvases.entries()) {
+      if(typeof canvas.id!=="string" || !canvas.id || seen.has(canvas.id)) throw Error("画布 ID 无效或重复");
+      seen.add(canvas.id);
+      const entry="canvases/"+String(i+1).padStart(3,"0")+".livemg";
+      files[entry]=await saveLivemg(canvas.scene,data,undefined,{includeAssets:embedded});
+      refs.push({id:canvas.id,file:entry});
+    }
+    files["project.json"]=strToU8(JSON.stringify({...project,canvases:refs}));
+    if(!embedded) await packResources(files,scenes,data);
+    return archive(files,4,scenes,{sharedAssets:!embedded});
+  }
+  const files=Object.assign(Object.create(null),{"project.json":strToU8(JSON.stringify(project))});
+  if(options.includeAssets!==false) await packResources(files,scenes,data);
+  if(thumbnail && /^data:image\/png;base64,/.test(thumbnail))
+    files["thumbnail.png"]=Buffer.from(thumbnail.split(",")[1],"base64");
+  return archive(files,project.format==="framestudio-montage" ? 3 : 2,scenes,{externalAssets:options.includeAssets===false});
+}
+async function packResources(files,scenes,data) {
+  const modelIds = [...new Set(scenes.flatMap(s=>s.models.map(m=>m.modelId)))];
   for (const id of modelIds) {
+    if (typeof id!=="string" || !id || id==="." || id===".." || /[\\/]/.test(id))
+      throw Error("无效的模型资源 ID");
     const dir = safe(path.join(data, "models"), id);
     for (const f of await walk(dir))
       files["models/" + id + "/" + f] = new Uint8Array(
         await fs.readFile(safe(dir, f)),
       );
   }
-  for (const asset of project.assets) {
-    if (!asset.path) continue;
+  const media=scenes.flatMap(s=>[...s.assets,...s.models.flatMap(m=>m.assets).filter(a=>a.motionFile).map(a=>({path:a.motionFile}))]);
+  for (const asset of media) {
+    if (!asset.path || Object.hasOwn(files,"assets/"+asset.path)) continue;
     files["assets/" + asset.path] = new Uint8Array(
       await fs.readFile(safe(data, asset.path)),
     );
   }
-  if (thumbnail && /^data:image\/png;base64,/.test(thumbnail))
-    files["thumbnail.png"] = Buffer.from(thumbnail.split(",")[1], "base64");
-  files["manifest.json"] = strToU8(
-    JSON.stringify(
-      {
-        format: "livemg",
-        schemaVersion: 2,
-        appVersion: "2.8.0",
-        savedAt: new Date().toISOString(),
-        files: Object.entries(files).map(([file, bytes]) => ({
-          file,
-          bytes: bytes.length,
-          sha256: hash(bytes),
-        })),
-        embeddedFonts: project.assets
-          .filter((a) => a.kind === "font")
-          .map((a) => a.fontFamily),
-      },
-      null,
-      2,
-    ),
-  );
-  return zipSync(files, { level: 1 });
+}
+function archive(files,schemaVersion,scenes,extra) {
+  files["manifest.json"]=strToU8(JSON.stringify({
+    format:"livemg",schemaVersion,appVersion:"2.15.2",savedAt:new Date().toISOString(),...extra,
+    files:Object.entries(files).map(([file,bytes])=>({file,bytes:bytes.length,sha256:hash(bytes)})),
+    embeddedFonts:[...new Set(scenes.flatMap(s=>s.assets).filter(a=>a.kind==="font").map(a=>a.fontFamily))],
+  }));
+  return zipSync(files,{level:1});
+}
+function readArchive(bytes) {
+  const files=unzipSync(bytes);
+  if(!files["manifest.json"] || !files["project.json"]) throw Error("缺少 .livemg 工程清单");
+  const manifest=JSON.parse(strFromU8(files["manifest.json"]));
+  const p=JSON.parse(strFromU8(files["project.json"]));
+  if(manifest.format!=="livemg" || !Array.isArray(manifest.files)) throw Error("工程格式或版本不支持");
+  let total=0;
+  const listed=new Set(manifest.files.map(v=>v.file));
+  if(listed.size!==manifest.files.length || !listed.has("project.json") ||
+      Object.keys(files).some(n=>!n.endsWith("/") && n!=="manifest.json" && !listed.has(n)))
+    throw Error("工程包含未校验或重复的资源");
+  for(const v of manifest.files) {
+    const f=Object.hasOwn(files,v.file) && files[v.file];
+    if(!f || f.length!==v.bytes || hash(f)!==v.sha256) throw Error("工程资源损坏或缺失："+v.file);
+    total+=f.length;
+    if(total>1024*1024*1024) throw Error("工程资源超过 1 GB");
+  }
+  return {p,files,manifest,total};
 }
 export async function openLivemg(bytes, data) {
-  const files = unzipSync(bytes);
-  if (!files["manifest.json"] || !files["project.json"])
-    throw Error("缺少 .livemg 工程清单");
-  const manifest = JSON.parse(strFromU8(files["manifest.json"])),
-    p = JSON.parse(strFromU8(files["project.json"]));
-  if (
-    manifest.format !== "livemg" ||
-    manifest.schemaVersion !== 2 ||
-    p.version !== 2 ||
-    !Array.isArray(p.layers) ||
-    !Array.isArray(p.tracks)
-  )
-    throw Error("工程格式或版本不支持");
-  let total = 0;
-  const listed = new Set(manifest.files.map((v) => v.file));
-  if (
-    listed.size !== manifest.files.length ||
-    Object.keys(files).some(
-      (n) => !n.endsWith("/") && n !== "manifest.json" && !listed.has(n),
-    )
-  )
-    throw Error("工程包含未校验或重复的资源");
-  for (const v of manifest.files) {
-    const f = files[v.file];
-    if (!f || f.length !== v.bytes || hash(f) !== v.sha256)
-      throw Error("工程资源损坏或缺失：" + v.file);
-    total += f.length;
-    if (total > 1024 * 1024 * 1024) throw Error("工程资源超过 1 GB");
+  const {p,files,manifest,total}=readArchive(bytes);
+  if(manifest.externalAssets) {
+    const [scene]=projectScenes(p);
+    try {
+      await Promise.all([
+        ...scene.models.map(m=>fs.access(safe(path.join(data,"models"),m.modelId+"/"+m.file))),
+        ...scene.assets.map(a=>fs.access(safe(data,a.path))),
+        ...scene.models.flatMap(m=>m.assets).filter(a=>a.motionFile).map(a=>fs.access(safe(data,a.motionFile))),
+      ]);
+      return p;
+    } catch {throw Error("此画布引用本地资产，当前工作区缺少资源。请打开原 .livemgs 或使用含资产的独立 .livemg");}
   }
+  if(manifest.schemaVersion===4) {
+    if(p.format!=="framestudio-montage" || p.version!==1 || !Array.isArray(p.canvases) || p.canvases.length>120)
+      throw Error("总工程格式无效");
+    let expanded=total;
+    const seen=new Set();
+    p.canvases=p.canvases.map(ref=>{
+      if(typeof ref?.file!=="string" || !/^canvases\/\d{3}\.livemg$/.test(ref.file) || !Object.hasOwn(files,ref.file) || seen.has(ref.file))
+        throw Error("缺少独立画布工程");
+      seen.add(ref.file);
+      const entry=readArchive(files[ref.file]);
+      if(entry.manifest.schemaVersion!==2 || entry.p.format!=="livemg") throw Error("子画布格式无效");
+      expanded+=entry.total;
+      if(expanded>1024*1024*1024) throw Error("工程展开后超过 1 GB");
+      for(const [name,blob] of Object.entries(entry.files)) {
+        if(!name.startsWith("assets/") && !name.startsWith("models/")) continue;
+        if(Object.hasOwn(files,name) && hash(files[name])!==hash(blob)) throw Error("子画布的同名资产内容冲突");
+        files[name]=blob;
+      }
+      return {id:ref.id,scene:entry.p};
+    });
+  } else if(manifest.schemaVersion!==(p.format==="framestudio-montage" ? 3 : 2)) throw Error("工程格式或版本不支持");
+  const scenes=projectScenes(p);
   const prefix = "livemg-" + randomUUID().slice(0, 8),
     remap = new Map();
-  for (const m of p.models) {
+  const models=scenes.flatMap(s=>s.models);
+  for (const m of models) {
     if (!remap.has(m.modelId))
       remap.set(
         m.modelId,
-        prefix + "-" + m.modelId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50),
+        prefix + "-" + remap.size + "-" + m.modelId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50),
       );
   }
   for (const [old, id] of remap) {
@@ -109,16 +152,21 @@ export async function openLivemg(bytes, data) {
       await fs.writeFile(dest, v);
     }
   }
-  for (const m of p.models) m.modelId = remap.get(m.modelId);
-  for (const a of p.assets) {
-    const file = files["assets/" + a.path];
-    if (!file) throw Error("缺少媒体资源：" + a.name);
-    const next = "media/" + prefix + "/" + a.id + path.extname(a.path),
-      dest = safe(data, next);
-    await fs.mkdir(path.dirname(dest), { recursive: true });
-    await fs.writeFile(dest, file);
-    a.path = next;
+  for (const m of models) m.modelId = remap.get(m.modelId);
+  const importedAssets=new Map();
+  async function importAsset(original,name) {
+    if(importedAssets.has(original)) return importedAssets.get(original);
+    const file=files["assets/"+original];
+    if(!file) throw Error("缺少媒体资源："+name);
+    const ext=original.endsWith(".motion3.json") ? ".motion3.json" : path.extname(original);
+    const next="media/"+prefix+"/"+hash(original).slice(0,24)+ext;
+    const dest=safe(data,next);
+    await fs.mkdir(path.dirname(dest),{recursive:true});
+    await fs.writeFile(dest,file);importedAssets.set(original,next);
+    return next;
   }
+  for(const a of scenes.flatMap(s=>s.assets)) a.path=await importAsset(a.path,a.name);
+  for(const a of models.flatMap(m=>m.assets)) if(a.motionFile) a.motionFile=await importAsset(a.motionFile,a.name);
   return p;
 }
 export async function volumeEnvelope(file, duration, points) {

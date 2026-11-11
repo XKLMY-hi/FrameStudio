@@ -10,12 +10,16 @@
 .env
 .env.*
 .npmrc
+agent-config.json
+agent-config.json.*.tmp
+agent-vault.json
 *.pem
 *.pfx
 *.key
 *.log
 *.zip
 *.livemg
+*.livemgs
 *.l2dstudio
 *.moc
 *.moc3

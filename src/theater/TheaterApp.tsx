@@ -1,11 +1,23 @@
 import React, {
   useEffect,
+  useCallback,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { ProjectCanvases } from "./ProjectCanvases";
+import { MontageWorkspace } from "./MontageWorkspace";
+import { MontageRenderer } from "./montage-renderer";
+import { editMontage, emptyMontage, isMontage, loadMontage, montageAudio, montageEnd,
+  withMontageCanvas, type Montage } from "./montage";
+import { AgentCursor, agentCanvasActivity, type AgentFocus } from "./AgentCursor";
+import { SceneJsonEditor } from "./SceneJsonEditor";
+import { defaultShape, shapeSvg, validateShape } from "./shape";
+import { textAnimationFile, applyTextAnimation } from "./appearance-preset";
+import { emptyGraph,graphOrder, validateEffectGraph } from "./effect-graph";
 import { freeze, produce } from "immer";
+import { createPortal } from "react-dom";
 import {
   Plus,
   Layers,
@@ -49,10 +61,22 @@ import {
   FilePlus2,
   ArrowUpRight,
   Minus,
-  ListTree,
   SquareDashed,
+  Square,
+  Code2,
+  Activity,
 } from "lucide-react";
 import { api, download, media, token } from "../api";
+import { McpControls, shaderTargets, useShaderAgent, type ShaderDraft } from "./CodeShaderPanel";
+import { validateCodeShader, type CodeShader } from "../../backend/shader-format.mjs";
+import { appendShader, currentPostGraph, editAgentGraph, postRevision, writePostGraph } from "./agent-graph";
+import { AgentPanel } from "./AgentPanel";
+import { editDesignScene, numberArgument, objectArgument } from "./agent-edit";
+import { inspectDesignScene, type DesignDraft } from "./agent-inspect";
+import { graphInstructions } from "../../backend/graph-tools.mjs";
+import designSkill from "../../backend/skills/framestudio-design/SKILL.md?raw";
+import layoutSkill from "../../backend/skills/framestudio-design/references/layout.md?raw";
+import timelineSkill from "../../backend/skills/framestudio-design/references/timeline.md?raw";
 import {
   Asset,
   Group,
@@ -64,21 +88,30 @@ import {
 } from "../types";
 import { clamp, classify, parseAsset, parseCatalogAsset, parseLegacy } from "../engine";
 import { cubism2, isCubism2File, lipParameters } from "../cubism2";
-import { CurveWorkspace } from "./CurveWorkspace";
+import { CurveWorkspace, type AgentCurveSelection } from "./CurveWorkspace";
 import { LightPanel } from "./LightPanel";
 import { ModelPreprocessPanel } from "./ModelPreprocessPanel";
+import { ModelWorkbench, type ModelWorkbenchTab } from "./ModelWorkbench";
+import { ModelPoseControls, modelControls, modelPoseStore, type PoseInput } from "./ModelPoseControls";
+import { applyTextureCopy,checkedStrokes,drawTextureStroke,editMotion,loadTextureCanvas,newMotion,saveMotion,saveTexture,textureCatalog,textureUrl } from "./model-edit";
 import { ShaderControls } from "./ShaderControls";
+import { EffectGraphControls } from "./EffectGraphControls";
+import { AppearancePresetControls } from "./AppearancePresetControls";
+import { appearanceCurves, lightAppearance, setAppearanceCurves, textAppearance } from "./appearance-preset";
+import type { EffectGraph } from "./effect-graph";
 import { defaultTitleAmount, defaultTitleDuration, isTitleMotion, titleMotions, type TextAnimation, type TitleMotion } from "./text-motion";
 import { preprocessingScene } from "./preprocess";
-import { receivesLight } from "./lighting";
+import { lightAffects, receivesLight, worldLights } from "./lighting";
 import { SceneTimeline, formatTimecode } from "./SceneTimeline";
 import {
   Binding,
   readProperty,
   writeProperty,
   propertiesOf,
+  clipById,
   parameterDriven,
 } from "./properties";
+import { effectParameter } from "./properties";
 import { AudioLibraryPreview } from "./AudioLibraryPreview";
 import { SceneRenderer, type MirrorView } from "./scene-renderer";
 import {
@@ -99,7 +132,8 @@ import {
   type OverlayFrame,
 } from "./ViewportOverlay";
 import { AuditionControls } from "./AuditionControls";
-import { AppearanceMenu, normalizePreferences, type Preferences } from "./AppearanceMenu";
+import { normalizePreferences, type Preferences } from "./AppearanceMenu";
+import { StudioSettings, type SettingsPage } from "./StudioSettings";
 import {
   advanceAudition,
   auditionProject,
@@ -130,6 +164,7 @@ import {
   defaultLight,
   MAX_SCENE_LIGHTS,
   sceneEffects,
+  type ModelControl,
   addVisual,
   cameraChannels,
   channels,
@@ -151,12 +186,13 @@ import {
   pasteLayerTrees,
   type LayerClipboard,
   enabledTracks,
+  previewFrameTime,
   layerAlpha,
   modelValues,
   modelProject,
   projectPoint,
   reparentSafe,
-  sampleKeys,
+  splitSceneClip,
   spatialLayer,
   sourceTime,
   upsertKey,
@@ -169,6 +205,13 @@ declare global {
   }
 }
 const format = (n: number) => Number((Number.isFinite(n) ? n : 0).toFixed(4));
+function agentHandle(channel:string) {
+  if (["x","y","z"].includes(channel)) return "move-"+channel;
+  if (channel==="scaleX" || channel==="scaleY") return "scale-"+channel.slice(-1).toLowerCase();
+  if (channel==="rotation") return "rotate-z";
+  if (channel==="rotationX" || channel==="rotationY") return "rotate-"+channel.slice(-1).toLowerCase();
+}
+
 function Num({
   label,
   value,
@@ -260,7 +303,67 @@ const icons: Record<Layer["kind"], React.ReactNode> = {
   audio: <Music2 size={16} />,
   light: <Lamp size={16} />,
 };
+const noWorkbenchParams: Param[]=[];
+const ShaderGraphEditor = React.lazy(() => import("./EffectNodeEditor"));
 export default function TheaterApp() {
+  const [shaderDraft, setShaderDraft] = useState<ShaderDraft>();
+  const [montage,setMontage]=useState<Montage>();
+  const montageRef=useRef<Montage>(undefined);
+  const [montageDraft,setMontageDraft]=useState<{base?:Montage;sceneBase:Scene;value:Montage;name:string;revision:number;target?:string;targetCanvasId?:string}>();
+  const montageDraftRef=useRef<typeof montageDraft>(undefined);
+  const appliedDraft=useRef<{kind:"scene";draft:DesignDraft;after:Scene}|
+    {kind:"montage";draft:NonNullable<typeof montageDraft>;after:Montage;activeAfter:Scene;before?:Montage}>(undefined);
+  const [workbenchTab,setWorkbenchTab]=useState<ModelWorkbenchTab>("look");
+  const [textureBoard,setTextureBoard]=useState<HTMLDivElement|null>(null);
+  const [motionDock,setMotionDock]=useState<HTMLDivElement|null>(null);
+  const [modelDockHeight,setModelDockHeight]=useState(330);
+  const [selectedControl,setSelectedControl]=useState("");
+  const [sceneControls,setSceneControls]=useState(false);
+  const poseStore=useMemo(modelPoseStore,[]);
+  const poseActor=useRef("");
+  const motionPose=useRef<PoseInput|undefined>(undefined);
+  const workbenchEdits=useRef({motion:false,texture:false});
+  const setMotionDirty=useCallback((dirty:boolean)=>{workbenchEdits.current.motion=dirty;},[]);
+  const setTextureDirty=useCallback((dirty:boolean)=>{workbenchEdits.current.texture=dirty;},[]);
+  function allowWorkbenchExit() {
+    const {motion,texture}=workbenchEdits.current;
+    return (!motion && !texture) || confirm("模型工作台有未保存的动作或贴图。离开会丢弃这些改动，继续吗？");
+  }
+  function returnFromWorkbench() {
+    if(allowWorkbenchExit())setWorkspaceMode("scene");
+  }
+  const attachMotionPose=useCallback((input?:PoseInput)=>{motionPose.current=input;},[]);
+  const [settingsTab,setSettingsTab]=useState<SettingsPage>("appearance");
+  const [settingsHost,setSettingsHost]=useState<HTMLElement|null>(null);
+  const [montageMode,setMontageMode]=useState(false);
+  const [montageTime,setMontageTime]=useState(0);
+  const montageClock=useRef(0);
+  const sceneSaveQueue=useRef(Promise.resolve());
+  const [montagePlaying,setMontagePlaying]=useState(false);
+  const [montageSelection,setMontageSelection]=useState("");
+  const [exportScope,setExportScope]=useState<"canvas"|"montage">("canvas");
+  const montageRenderer=useRef<MontageRenderer>(undefined);
+  const montageInput=useRef<HTMLInputElement>(null);
+  type MontageChange={before:Montage;after:Montage};
+  const montageHistory=useRef<{past:MontageChange[];future:MontageChange[]}>({past:[],future:[]});
+  const canvasHistory=useRef(new Map<string,{past:Scene[];future:Scene[];time:number;selected:string}>());
+  const [designDraft, setDesignDraft] = useState<DesignDraft>();
+  const designRef = useRef<DesignDraft | undefined>(undefined);
+  const designRevision = useRef(0);
+  const [graphLocation, setGraphLocation] = useState<{target:string;canvasId?:string}>();
+  const graphTarget=graphLocation?.target;
+  function setGraphTarget(target?:string,canvasId?:string) {
+    setGraphLocation(target ? {target,canvasId} : undefined);
+  }
+  const agentActivity = useMemo(agentCanvasActivity, []);
+  const agentViewport = useRef<HTMLDivElement>(null);
+  const [jsonEdit, setJsonEdit] = useState<"shape"|"text">();
+  const selectedLibraryAudio = useRef<string>(undefined);
+  const curveSelection = useRef<AgentCurveSelection>(undefined);
+  const focusedControl = useRef<{layerId:string; binding?:Binding; label:string; value:string|boolean}>(undefined);
+
+  const shaderDraftRef = useRef<ShaderDraft | undefined>(undefined);
+  const shaderDocument = useRef(crypto.randomUUID());
   const [scene, setScene] = useState<Scene>(emptyScene),
     [ready, setReady] = useState(false),
     [busy, setBusy] = useState(""),
@@ -286,7 +389,8 @@ export default function TheaterApp() {
     [time, setTime] = useState(0),
     [playing, setPlaying] = useState(false),
     [libraryTab, setLibraryTab] = useState("model"),
-    [managerTab, setManagerTab] = useState<"layers" | "assets" | "tree">("layers"),
+    [managerTab, setManagerTab] = useState<"layers" | "assets">("layers"),
+    [sceneList, setSceneList] = useState<"layers" | "tree">("layers"),
     [foldedGroups, setFoldedGroups] = useState<Record<string, boolean>>({}),
     [gizmoTool, setGizmoTool] = useState<GizmoTool>("move"),
     [preferences, setPreferences] = useState(() => normalizePreferences()),
@@ -308,10 +412,10 @@ export default function TheaterApp() {
     [expandedView, setExpandedView] = useState(false),
     [viewGrid, setViewGrid] = useState(true),
     [viewCamera, setViewCamera] = useState(true),
-    [quality, setQuality] = useState(960),
+
     [paramSearch, setParamSearch] = useState(""),
     [paramPage, setParamPage] = useState(0),
-    [modal, setModal] = useState<"" | "canvas" | "export" | "help">(""),
+    [modal, setModal] = useState<"" | "canvas" | "export" | "help" | "settings">(""),
     [exportFormat, setExportFormat] = useState("mp4"),
     [exportStatus, setExportStatus] = useState(""),
     [progress, setProgress] = useState(0),
@@ -320,7 +424,7 @@ export default function TheaterApp() {
     [previewId, setPreviewId] = useState(""),
     [motionPreviewId, setMotionPreviewId] = useState(""),
     [motionTargetId, setMotionTargetId] = useState(""),
-    [timelineHeight, setTimelineHeight] = useState(370),
+    [timelineHeight, setTimelineHeight] = useState(316),
     [exportMatte, setExportMatte] = useState("#ffffff"),
     [historyVersion, setHistoryVersion] = useState(0),
     [modelVersion, setModelVersion] = useState(0),
@@ -333,7 +437,7 @@ export default function TheaterApp() {
   const overlay = useMemo(viewportStore, []),
     mirrorOverlay = useMemo(viewportStore, []);
   const preferenceWrite = useRef(Promise.resolve());
-  const { appearance, accent } = preferences;
+  const { appearance, accent,previewQuality:quality } = preferences;
   const host = useRef<HTMLDivElement>(null),
     menuRef = useRef<HTMLDivElement>(null),
     mirrorHost = useRef<HTMLDivElement>(null),
@@ -379,13 +483,19 @@ export default function TheaterApp() {
   playRef.current = playing;
   busyRef.current = busy;
   liveRef.current = curveOpen || inspectorOpen || expandedView;
-  const selectedLayer = scene.layers.find((l) => l.id === selected),
-    selectedClip = scene.tracks
+  const montageCommitted=useMemo(()=>montage && withMontageCanvas(montage,montage.activeCanvasId,scene),[montage,scene]);
+  const visibleMontageDraft=montageDraft?.base===montage && montageDraft?.sceneBase===scene ? montageDraft : undefined;
+  const montagePreview=visibleMontageDraft?.value ?? montageCommitted;
+  const activePreview=visibleMontageDraft?.value.canvases.find(c=>c.id===montage?.activeCanvasId)?.scene;
+  const visibleDesign = designDraft?.base === scene ? designDraft.scene : activePreview!==scene ? activePreview : undefined;
+  const inspection = visibleDesign ?? scene;
+  const selectedLayer = inspection.layers.find((l) => l.id === selected),
+    selectedClip = inspection.tracks
       .flatMap((t) => t.clips)
       .find((c) => selection.includes(c.id) && c.layerId === selected),
-    selectedMedia = scene.assets.find((a) => a.id === selectedClip?.assetId),
+    selectedMedia = inspection.assets.find((a) => a.id === selectedClip?.assetId),
     resource = selectedLayer?.model
-      ? scene.models.find((m) => m.id === selectedLayer.model!.resourceId)
+      ? inspection.models.find((m) => m.id === selectedLayer.model!.resourceId)
       : undefined,
     runtime = selectedLayer
       ? rRef.current?.nodes.get(selectedLayer.id)?.runtime
@@ -393,12 +503,12 @@ export default function TheaterApp() {
     params = runtime?.params || [],
     values =
       selectedLayer?.model && workspaceMode === "scene"
-        ? modelValues(scene, selectedLayer, params, time)
+        ? modelValues(inspection, selectedLayer, params, time)
         : {},
     animated = selectedLayer
-      ? animatedLayer(scene, selectedLayer, time)
+      ? animatedLayer(inspection, selectedLayer, time)
       : undefined,
-    camera = animatedCamera(scene, time);
+    camera = animatedCamera(inspection, time);
   const motionLayer = selectedLayer?.model
     ? selectedLayer
     : scene.layers.find((l) => l.id === motionTargetId && l.model);
@@ -418,18 +528,67 @@ export default function TheaterApp() {
     [scene.layers, modelVersion],
   );
   const preprocessingResource =
-    scene.models.find((r) => r.id === preprocessId) ||
+    inspection.models.find((r) => r.id === preprocessId) ||
     resource ||
-    scene.models[0];
+    inspection.models[0];
+  const modelWorkspace=workspaceMode==="preprocess";
+  const motionWorkspace=modelWorkspace && workbenchTab==="motion";
+  const textureWorkspace=modelWorkspace && workbenchTab==="texture";
+  const previewModelId=preprocessingResource ? "@preprocess:"+preprocessingResource.id : "";
+  const previewModelParams=rRef.current?.nodes.get(previewModelId)?.runtime?.params ?? noWorkbenchParams;
+  const workbenchControls=useMemo(()=>modelControls(preprocessingResource?.controls),[preprocessingResource?.controls]);
+  const instanceControls=useMemo(()=>modelControls(resource?.controls),[resource?.controls]);
+  const poseActorId=modelWorkspace
+    ? ((workbenchTab==="rig"||motionWorkspace) && workbenchControls.length ? previewModelId : "")
+    : (sceneControls && selectedLayer?.model && instanceControls.length && !visibleDesign ? selectedLayer.id : "");
+  poseActor.current=poseActorId;
+  useEffect(()=>{poseStore.publish();rRef.current?.invalidate();},[poseActorId,poseStore]);
+  const poseWorkbench=useCallback((values:Record<string,number>)=>{
+    const r=rRef.current?.nodes.get(previewModelId)?.runtime;
+    if(r){r.previewOverrides=values;r.invalidate();rRef.current?.invalidate();}
+  },[previewModelId]);
+  function saveModelControls(controls:ModelControl[]) {
+    if (!preprocessingResource) return;
+    change(s=>{
+      const model=s.models.find(r=>r.id===preprocessingResource.id);
+      if(model)model.controls=controls;
+    });
+  }
+  function instancePose():PoseInput|undefined {
+    if(!selectedLayer?.model || selectedLayer.locked || !runtime || draftLocked())return;
+    const id=selectedLayer.id,at=tRef.current;
+    playRef.current=false;setPlaying(false);stopMotionPreview();
+    const preview=(next:Record<string,number>)=>{
+      runtime.previewOverrides=next;runtime.invalidate();rRef.current?.invalidate();
+    };
+    return {values,preview,commit:next=>{
+      preview({});
+      const first=Object.keys(next)[0];
+      if(!first)return;
+      setChannel("param:"+first);
+      if(curveOpen)setCurveSeed({layerId:id,channel:"param:"+first});
+      lastEdit.current=0;
+      change(s=>{
+        for(const [param,value] of Object.entries(next)) {
+          const binding={layerId:id,channel:"param:"+param};
+          const data=readProperty(s,binding,at),keys=cloneData(data.keys);
+          const local=Math.max(0,(at-data.offset)*data.speed);
+          if(!keys.length && local>1/s.fps)keys.push({t:0,v:values[param]??data.base,mode:"bezier"});
+          upsertKey(keys,local,value,s.fps);
+          writeProperty(s,binding,keys);
+        }
+      });
+    }};
+  }
   const displayScene = useMemo(
     () =>
       workspaceMode === "preprocess"
         ? freeze(
-            preprocessingScene(scene, preprocessingResource?.id || "", preprocessOriginal),
+            preprocessingScene(visibleDesign ?? scene, preprocessingResource?.id || "", preprocessOriginal),
             true,
           )
-        : scene,
-    [scene, workspaceMode, preprocessingResource?.id, preprocessOriginal],
+        : visibleDesign ?? scene,
+    [scene, visibleDesign, workspaceMode, preprocessingResource?.id, preprocessOriginal],
   );
   displayRef.current = displayScene;
   modeRef.current = workspaceMode;
@@ -438,10 +597,197 @@ export default function TheaterApp() {
     channel,
     clipId: selectedClip?.id,
   };
+  function getMontageRenderer() {
+    return montageRenderer.current ??= new MontageRenderer(rRef.current!,()=>sRef.current);
+  }
+  function updateMontage(p?:Montage) {
+    montageRef.current=p;
+    setMontage(p);
+  }
+  function currentMontage() {
+    const p=montageRef.current;
+    return p && withMontageCanvas(p,p.activeCanvasId,sRef.current);
+  }
+  function discardMontageDraft(keepView=false) {
+    montageDraftRef.current=undefined;setMontageDraft(undefined);rRef.current?.invalidate();
+    if(!montageRef.current && !keepView) setMontageMode(false);
+  }
+  function activeMontage() {
+    const draft=montageDraftRef.current;
+    if(draft && (draft.base!==montageRef.current || draft.sceneBase!==sRef.current)) throw Error("工程已变更，请重新读取总时间线");
+    return draft?.value ?? currentMontage();
+  }
+  function seekMontage(at:number) {
+    const p=montageDraftRef.current?.value ?? currentMontage();
+    const next=Math.max(0,Math.min(p ? montageEnd(p) : 0,at));
+    montageClock.current=next;setMontageTime(next);
+  }
+  function playMontage(value:boolean) {
+    if(!value) seekMontage(montageClock.current);
+    setMontagePlaying(value);
+  }
+  function showMontage() {
+    if(!ready || busy || (modeRef.current==="preprocess" && !allowWorkbenchExit())) return;
+    if(designRef.current || shaderDraftRef.current) {notify("请先应用或丢弃当前 Agent / 着色器草稿");return;}
+    setContextMenu(undefined);
+    setGraphTarget(undefined);
+    setPlaying(false);playRef.current=false;stopMotionPreview();syncRef.current();
+    setMontageMode(true);
+  }
+  function showCanvas() {
+    if (modeRef.current==="preprocess" && !allowWorkbenchExit()) return;
+    if (montageMode) playMontage(false);
+    setMontageMode(false);
+    setWorkspaceMode("scene");
+    setGraphTarget(undefined);
+  }
+  async function openMontageCanvas(id:string,p=currentMontage()) {
+    if(!p || !p.canvases.some(c=>c.id===id)) return;
+    const current=p.activeCanvasId;
+    if (id===current) { showCanvas(); return; }
+    canvasHistory.current.set(current,{past:history.current,future:future.current,time:tRef.current,selected});
+    const stacks=canvasHistory.current.get(id);
+    history.current=stacks?.past??[];future.current=stacks?.future??[];
+    updateMontage({...p,activeCanvasId:id});
+    playMontage(false);setMontageMode(false);
+    const source=p.canvases.find(c=>c.id===id)!.scene;
+    await loadScene(source,true);
+    if(stacks) {
+      seek(stacks.time);
+      if(stacks.selected==="@camera" || source.layers.some(l=>l.id===stacks.selected)) selectLayer(stacks.selected);
+    }
+  }
+  function applyMontage(p:Montage,record=true) {
+    const previous=currentMontage();
+    if(previous===p) return;
+    if(record && previous) {
+      montageHistory.current.past.push({before:previous,after:p});
+      if(montageHistory.current.past.length>60) montageHistory.current.past.shift();
+      montageHistory.current.future=[];
+    }
+    updateMontage(p);setDirty(true);
+    const source=p.canvases.find(c=>c.id===p.activeCanvasId)!;
+    if((previous && previous.activeCanvasId!==p.activeCanvasId) || source.scene.id!==sRef.current.id) {
+      if(previous) canvasHistory.current.set(previous.activeCanvasId,{past:history.current,future:future.current,time:tRef.current,selected});
+      const stacks=canvasHistory.current.get(p.activeCanvasId);
+      history.current=stacks?.past??[];future.current=stacks?.future??[];
+      void loadScene(source.scene,true);
+    } else if(source.scene!==sRef.current) change(source.scene,record);
+    seekMontage(montageClock.current);
+  }
+  function editMontageUI(edits:unknown) {
+    try {
+      if(draftLocked()) throw Error("请先应用或丢弃当前草稿");
+      const p=currentMontage();
+      if(!p) throw Error("请先打开总时间线");
+      const next=editMontage(p,edits).montage;
+      if(next.outputGraph && next.outputGraph!==p.outputGraph) rRef.current?.probePostGraph(next.outputGraph);
+      applyMontage(next);
+      if (next.clips.length>p.clips.length) setMontageSelection(next.clips.at(-1)!.id);
+      else if (montageSelection && !next.clips.some(clip=>clip.id===montageSelection)) setMontageSelection("");
+    } catch(error) {notify(error instanceof Error ? error.message : String(error));}
+  }
+  function stepMontageHistory(redo:boolean) {
+    if(!redo && restoreMontageDraft()) return;
+    const {past,future}=montageHistory.current,p=currentMontage();
+    const from=redo ? future : past, to=redo ? past : future;
+    if(!p || !from.length || montageDraftRef.current) return;
+    const entry=from.pop()!;
+    to.push(entry);
+    const target=redo ? entry.after : entry.before, source=redo ? entry.before : entry.after;
+    const merged=target.canvases.reduce((next,c)=>{
+      const current=p.canvases.find(x=>x.id===c.id), old=source.canvases.find(x=>x.id===c.id);
+      return current && current.scene!==old?.scene ? withMontageCanvas(next,c.id,current.scene) : next;
+    },target);
+    applyMontage({...merged,activeCanvasId:merged.canvases.some(c=>c.id===p.activeCanvasId) ? p.activeCanvasId : merged.activeCanvasId},false);
+  }
+  function previewMontage(p:Montage,name:string,target?:string,show=false,targetCanvasId?:string) {
+    if(busyRef.current || !ready) throw Error("编辑器正在加载或导出");
+    const previous=activeMontage();
+    if(p.outputGraph && p.outputGraph!==previous?.outputGraph) rRef.current?.probePostGraph(p.outputGraph);
+    const draft={base:montageRef.current,sceneBase:sRef.current,value:p,name,
+      revision:++designRevision.current,target:target??montageDraftRef.current?.target,
+      targetCanvasId:target ? targetCanvasId : montageDraftRef.current?.targetCanvasId};
+    montageDraftRef.current=draft;setMontageDraft(draft);
+    if(show) {
+      setPlaying(false);playRef.current=false;stopMotionPreview();syncRef.current();
+      setMontageMode(true);
+    }
+    rRef.current?.invalidate();
+    return {status:"ready",revision:draft.revision};
+  }
+  function commitMontageDraft() {
+    const draft=montageDraftRef.current;
+    if(!draft || busyRef.current) return;
+    const after=activeMontage()!,before=currentMontage();
+    discardMontageDraft(true);applyMontage(after);
+    appliedDraft.current={kind:"montage",draft,after,activeAfter:sRef.current,before};
+  }
+  function restoreMontageDraft() {
+    const entry=appliedDraft.current;
+    if(entry?.kind!=="montage" || montageDraftRef.current || montageRef.current!==entry.after || sRef.current!==entry.activeAfter) return false;
+    appliedDraft.current=undefined;
+    const last=montageHistory.current.past.at(-1);
+    if(last?.after===entry.after) montageHistory.current.past.pop();
+    if(entry.before) applyMontage(entry.before,false);
+    else {
+      updateMontage(undefined);
+      if(sRef.current!==entry.draft.sceneBase) change(entry.draft.sceneBase,false);
+    }
+    const draft={...entry.draft,base:montageRef.current,sceneBase:sRef.current,revision:++designRevision.current};
+    montageDraftRef.current=draft;setMontageDraft(draft);setMontageMode(true);
+    return true;
+  }
+  function showSettings(tab:SettingsPage="appearance") {
+    setPlaying(false);playRef.current=false;playMontage(false);stopMotionPreview();
+    setGraphTarget(undefined);setSettingsTab(tab);setModal("settings");
+  }
+  function resetMontage() {
+    discardMontageDraft();updateMontage(undefined);setMontagePlaying(false);setMontageMode(false);
+    montageClock.current=0;setMontageTime(0);setMontageSelection("");montageHistory.current={past:[],future:[]};canvasHistory.current.clear();
+  }
+  async function importMontageCanvas(file:File) {
+    setBusy("读取画布素材…");
+    try {
+      const p=currentMontage();
+      if(!p || draftLocked()) throw Error("请先打开总时间线并确认当前草稿");
+      if(p.canvases.length>=120) throw Error("画布已达上限");
+      const input=await api<Scene|Montage>("project-open?format=livemg",file);
+      if(isMontage(input)) throw Error("请先在该总工程中另存需要的独立画布");
+      const scene=freeze(migrateScene(input),true),id=crypto.randomUUID();
+      const current=currentMontage();
+      if (!current || draftLocked()) throw Error("工程已变更，请重新导入");
+      applyMontage({...current,canvases:[...current.canvases,{id,scene}]});
+      notify("已导入「"+scene.name+"」。可在项目中将它加入总时间线。");
+    } catch(error) {notify(error instanceof Error ? error.message : String(error));}
+    finally {setBusy("");}
+  }
+  useEffect(()=>{
+    if(montageDraft && !visibleMontageDraft) {discardMontageDraft();notify("已撤下过期的总时间线草稿");}
+  },[montageDraft,visibleMontageDraft]);
+  useEffect(()=>{
+    if(montageMode) return;
+    montageRenderer.current?.close();
+    montageRenderer.current=undefined;
+  },[montageMode]);
+  useEffect(()=>()=>montageRenderer.current?.close(),[]);
   function notify(s: string) {
     setToast(s);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 4200);
+  }
+  function checkedModelName(value:unknown) {
+    if(typeof value!=="string" || !value.trim() || value.trim().length>150) throw Error("模型名称需为 1–150 个字符");
+    return value.trim();
+  }
+  function storePresetMotion(scene:Scene,resourceId:string,asset:Asset) {
+    const model=scene.models.find(m=>m.id===resourceId);
+    if(!model) throw Error("找不到模型素材");
+    const index=model.assets.findIndex(a=>a.id===asset.id);
+    if(index<0)model.assets.push(asset);else model.assets[index]=asset;
+    const owners=new Set(scene.layers.filter(l=>l.model?.resourceId===resourceId).map(l=>l.id));
+    for(const track of scene.tracks) for(const c of track.clips)
+      if(c.kind==="motion" && c.assetId===asset.id && owners.has(c.layerId)) c.name=asset.name;
   }
   function updatePreferences(next: Preferences) {
     setPreferences(next);
@@ -449,7 +795,11 @@ export default function TheaterApp() {
       .then(() => api("preferences", next))
       .catch(() => notify("外观设置未保存"));
   }
-  function change(mut: Scene | ((s: Scene) => void), record = true) {
+  function draftLocked(ignoreShader=false) {
+    return !!(designRef.current || montageDraftRef.current || (!ignoreShader && rRef.current?.shaderPreview));
+  }
+  function change(mut: Scene | ((s: Scene) => void), record=true,applyShader=false) {
+    if(draftLocked(applyShader)){notify("确认草稿后即可编辑");return;}
     stopMotionPreview();
     const current = sRef.current,
       next =
@@ -494,19 +844,612 @@ export default function TheaterApp() {
     setDirty(true);
     rRef.current?.invalidate();
   }
+  function clearShaderPreview(graph?: EffectGraph) {
+    const r = rRef.current;
+    if (graph && r?.shaderPreview?.graph !== graph) return;
+    if (r?.shaderPreview) {
+      r.shaderPreview = undefined;
+      r.invalidate();
+    }
+    shaderDraftRef.current = undefined;
+    setShaderDraft(undefined);
+  }
+  function requireShaderTarget(target: string) {
+    if (!shaderTargets(sRef.current).some(t => t.id === target && t.available))
+      throw Error("目标图层已锁定或不存在");
+  }
+  function previewPostGraph(target: string, graph: EffectGraph) {
+    const p = sRef.current, r = rRef.current;
+    if (!r || busyRef.current) throw Error("画布正在加载或导出");
+    requireShaderTarget(target);
+    r.probePostGraph(graph);
+    stopMotionPreview();
+    if (modeRef.current === "preprocess") setWorkspaceMode("scene");
+    if (target === "output" && r.orbitEnabled && (!mirrorHost.current || mirror.current.spatial))
+      toggleSpatial(false);
+    r.shaderPreview = { sceneId: p.id, target, graph };
+    r.invalidate();
+    return graph;
+  }
+  function savePostGraph(target: string, graph: EffectGraph, separateUndo = false) {
+    if (busyRef.current) throw Error("画布正在加载或导出");
+    requireShaderTarget(target);
+    const before=sRef.current;
+    if (separateUndo) lastEdit.current = 0;
+    if(draftLocked(separateUndo)) throw Error("确认当前草稿后即可编辑节点");
+    change(s => writePostGraph(s,target,graph),true,separateUndo);
+    if(separateUndo) appliedDraft.current={kind:"scene",after:sRef.current,draft:{
+      base:before,scene:sRef.current,name:graph.name,target,revision:++designRevision.current,
+    }};
+    if (rRef.current?.shaderPreview?.target === target) clearShaderPreview();
+  }
+  function localGraphDraft(target: string, graph: EffectGraph, name: string) {
+    previewPostGraph(target,graph);
+    const draft = {target,graph,name,revision:postRevision(sRef.current,target)};
+    shaderDraftRef.current = draft;
+    setShaderDraft(draft);
+    return draft;
+  }
+  function applyLocalGraphDraft() {
+    const draft = shaderDraftRef.current;
+    if (!draft) return;
+    if (draft.revision !== postRevision(sRef.current,draft.target) || rRef.current?.shaderPreview?.graph !== draft.graph)
+      throw Error("节点图已变更，请重新试渲染");
+    savePostGraph(draft.target,draft.graph,true);
+  }
+  function readPostGraph(target: string) {
+    requireShaderTarget(target);
+    return {graph:currentPostGraph(sRef.current,target),revision:postRevision(sRef.current,target)};
+  }
+  function shaderContext() {
+    const p = sRef.current;
+    return {document:shaderDocument.current,width:p.width,height:p.height,time:tRef.current,
+      busy:!!busyRef.current || !ready || !!designRef.current || !!montageDraftRef.current,
+      targets:shaderTargets(p), selected};
+  }
+  function clearDesignDraft() {
+    designRef.current = undefined;
+    setDesignDraft(undefined);
+    if (rRef.current) rRef.current.invalidate();
+  }
+  function activeDesignScene(canvasId?:string) {
+    const master=activeMontage();
+    if(master) {
+      const target=master.canvases.find(c=>c.id===(canvasId??master.activeCanvasId));
+      if(!target) throw Error("找不到总时间线中的画布");
+      return target.scene;
+    }
+    if(canvasId) throw Error("当前工程只有一张画布");
+    const draft = designRef.current;
+    if (draft && draft.base !== sRef.current) throw Error("工程已被手动编辑，请丢弃过期草稿后重试");
+    return draft?.scene ?? sRef.current;
+  }
+  function previewDesign(next: Scene, label: string, target?: string,canvasId?:string) {
+    if (busyRef.current || !ready) throw Error("编辑器正在加载或导出");
+    const previous = activeDesignScene(canvasId), r = rRef.current!;
+    if (next === previous) return {status:"unchanged",revision:montageDraftRef.current?.revision ?? designRef.current?.revision ?? 0};
+    const graphs = new Set<EffectGraph>();
+    if (next.outputGraph !== previous.outputGraph && next.outputGraph) graphs.add(next.outputGraph);
+    for (const l of next.layers) {
+      const graph = l.effects.graph;
+      if (graph && previous.layers.find(p=>p.id===l.id)?.effects.graph !== graph) graphs.add(graph);
+    }
+    for (const m of next.models) {
+      const graph = m.preprocess?.effects.graph;
+      if (graph && previous.models.find(p=>p.id===m.id)?.preprocess?.effects.graph !== graph) graphs.add(graph);
+    }
+    for (const graph of graphs) r.probePostGraph(graph);
+    const master=activeMontage();
+    if(master) {
+      const id=canvasId??master.activeCanvasId;
+      if(id===master.activeCanvasId && !montageMode) {
+        displayRef.current=next;
+        stopMotionPreview();
+        if (target==="output" && r.orbitEnabled) toggleSpatial(false);
+      }
+      return previewMontage(withMontageCanvas(master,id,next),label,target,false,id);
+    }
+    stopMotionPreview();
+    if (r.shaderPreview) clearShaderPreview();
+    setWorkspaceMode("scene");
+    if (target?.startsWith("@preprocess:")) {
+      openPreprocess(target.slice(12));
+      setPreprocessOriginal(false);
+    }
+    if (target==="output" && r.orbitEnabled && (!mirrorHost.current || mirror.current.spatial)) toggleSpatial(false);
+    const draft = {name:label,base:sRef.current,scene:next,revision:++designRevision.current,target:target ?? designRef.current?.target};
+    designRef.current = draft;
+    setDesignDraft(draft);
+    displayRef.current = next;
+    if (tRef.current > next.duration) seek(next.duration);
+    r.invalidate();
+    return {status:"ready",revision:draft.revision};
+  }
+  function applyDesignDraft() {
+    const draft=designRef.current,next=activeDesignScene();
+    if (!draft || next === sRef.current) return;
+    if (busyRef.current) throw Error("画布正在加载或导出");
+    clearDesignDraft();
+    lastEdit.current=0;
+    change(next);
+    appliedDraft.current={kind:"scene",draft,after:sRef.current};
+    if (selected !== "@camera" && !next.layers.some(l=>l.id===selected)) selectLayer("");
+  }
+  useEffect(() => {
+    if (designDraft && designDraft.base !== scene) {
+      clearDesignDraft();
+      notify("已撤下过期的 Agent 草稿");
+    }
+  }, [scene, designDraft]);
+  async function runAgentTool(name: string, value: unknown, canShare: boolean, signal: AbortSignal) {
+    const args=objectArgument(value);
+    if (name==="editor_skill") {
+      const skills={design:designSkill,layout:layoutSkill,timeline:timelineSkill,effects:graphInstructions+
+        "\nUse editor_edit {op:'graph',scope:'post'|'text'|'preprocess',id,resourceId,edits}. Text graphs use $identity, number nodes enter/exit/wave/ease, transform(progress,x,y,scale,opacity,angle), and combine(a,b). Read graph first; scopes post and preprocess are image graphs."};
+      if (typeof args.name!=="string" || !Object.hasOwn(skills,args.name)) throw Error("找不到对应设计技能");
+      return {skill:args.name,instructions:skills[args.name as keyof typeof skills]};
+    }
+    if(name.startsWith("montage_")) {
+      const current=activeMontage();
+      if(name==="montage_inspect") {
+        if(!current) return {active:false,currentCanvas:{name:sRef.current.name,duration:sRef.current.duration}};
+        const offset=typeof args.offset==="number" ? Math.max(0,Math.floor(args.offset)) : 0;
+        return {active:true,id:current.id,name:current.name,width:current.width,height:current.height,fps:current.fps,
+          duration:montageEnd(current),time:montageClock.current,selectedClip:montageSelection,activeCanvasId:current.activeCanvasId,
+          canvasCount:current.canvases.length,clipCount:current.clips.length,outputGraph:args.graph===true ? current.outputGraph : current.outputGraph?.name,
+          canvases:current.canvases.slice(offset,offset+24).map(({id,scene})=>({id,name:scene.name,duration:scene.duration,width:scene.width,height:scene.height,fps:scene.fps})),
+          clips:current.clips.slice(offset,offset+48)};
+      }
+      if(name==="montage_edit") {
+        const base=current ?? emptyMontage(activeDesignScene());
+        let output=base.outputGraph??currentPostGraph(emptyScene(),"output");
+        const edits=Array.isArray(args.edits) ? args.edits.map(input=>{
+          const e={...objectArgument(input)};
+          if(e.id==="selected") e.id=montageSelection;
+          if(e.op==="graph_nodes") {
+            output=editAgentGraph(output,e.edits);
+            return {op:"graph",graph:output};
+          }
+          if(e.op==="shader") {
+            output=appendShader(output,validateCodeShader(e.shader));return {op:"graph",graph:output};
+          }
+          if(e.op==="graph") output=e.graph===null ? currentPostGraph(emptyScene(),"output") : validateEffectGraph(e.graph);
+          return e;
+        }) : args.edits;
+        const {montage:value,created}=editMontage(base,edits);
+        const state=previewMontage(value,typeof args.label==="string" ? args.label.slice(0,80) : "编排总时间线",
+          value.outputGraph!==base.outputGraph ? "@master" : undefined,true);
+        if(!current && designRef.current) clearDesignDraft();
+        return {...state,created,activeCanvasId:value.activeCanvasId,duration:montageEnd(value)};
+      }
+      if(!current) throw Error("请先创建总时间线");
+      if(name==="montage_view") {
+        if(args.action==="open_canvas") {
+          if(montageDraftRef.current) throw Error("可用 canvasId 直接编辑草稿中的画布。应用草稿后即可切换工作区。");
+          if(typeof args.canvasId!=="string" || !current.canvases.some(c=>c.id===args.canvasId)) throw Error("找不到画布");
+          await openMontageCanvas(args.canvasId);
+        } else {
+          setPlaying(false);playRef.current=false;setMontageMode(true);
+          if(args.action==="seek") {const at=numberArgument(args.time,0,montageEnd(current),"总播放头");playMontage(false);seekMontage(at);}
+          else if(args.action==="play") {if(montageClock.current>=montageEnd(current)) seekMontage(0);playMontage(true);}
+          else if(args.action==="pause") playMontage(false);
+          else if(args.action!=="show") throw Error("未知总时间线视图操作");
+        }
+        return {status:"ready"};
+      }
+      if(name==="montage_render") {
+        const end=montageEnd(current),time=args.time===undefined ? montageClock.current : numberArgument(args.time,0,end,"总预览时间");
+        const preview=document.createElement("canvas");
+        await getMontageRenderer().render(current,previewFrameTime(end,current.fps,time),{maxEdge:360,preview});
+        signal.throwIfAborted();
+        const image=preview.toDataURL("image/jpeg",.78);
+        return {status:"ready",time,width:current.width,height:current.height,
+          artifact:{name:"总成片预览.jpg",mime:"image/jpeg",preview:image},...(canShare ? {previewImage:image} : {})};
+      }
+      throw Error("未知总时间线工具");
+    }
+    const master=activeMontage(), canvasId=typeof args.canvasId==="string" ? args.canvasId : master?.activeCanvasId;
+    const local=!master || canvasId===master.activeCanvasId;
+    const p=activeDesignScene(canvasId), r=rRef.current;
+    const targetSelected=local ? selected : "";
+    const wantsModelParams=(!local || montageMode) && (args.section==="model_params" || args.section==="property" ||
+      (name==="editor_edit" && Array.isArray(args.edits) && args.edits.some(e=>typeof e?.channel==="string" && e.channel.startsWith("param:"))));
+    const catalog=wantsModelParams ? await getMontageRenderer().parameters(p) : undefined;
+    signal.throwIfAborted();
+    const params=(id:string)=>catalog?.get(id) ?? (local ? r?.nodes.get(id)?.runtime?.params ?? [] : []);
+    const head=Math.min(local ? tRef.current : 0,p.duration), revision=montageDraftRef.current?.revision ?? designRef.current?.revision ?? 0;
+    const focused=local && focusedControl.current?.layerId===selected ? focusedControl.current : undefined;
+    const curve=local && curveOpen ? curveSelection.current : undefined;
+    const contextBinding=curve?.binding ?? focused?.binding ?? (local ? currentBinding : {layerId:"",channel:""});
+    const binding:Binding={...contextBinding,clipId:contextBinding.channel==="gain" || contextBinding.channel.startsWith("motion:")
+      ? contextBinding.clipId : undefined};
+    if(name==="model_inspect" || name==="model_edit") {
+      const model=p.models.find(m=>m.id===args.resourceId);
+      if(!model) throw Error("请指定画布中的模型素材 resourceId");
+      if(name==="model_inspect") {
+        const modelLayer=p.layers.find(l=>l.model?.resourceId===model.id);
+        let parameters=modelLayer ? params(modelLayer.id) : [];
+        if(!parameters.length) {
+          const view=preprocessingScene(p,model.id);
+          const catalog=await getMontageRenderer().parameters(view);
+          parameters=catalog.get("@preprocess:"+model.id)??[];
+        }
+        signal.throwIfAborted();
+        const offset=typeof args.offset==="number" ? Math.max(0,Math.floor(args.offset)) : 0;
+        const motion=model.assets.find(a=>a.id===args.motionId && a.kind==="motion");
+        const textures=await textureCatalog(model);
+        let image:string|undefined;
+        if(args.textureIndex!==undefined) {
+          const slot=textures.find(s=>s.index===args.textureIndex);
+          if(!slot) throw Error("贴图索引无效");
+          const source=document.createElement("canvas"),cv=document.createElement("canvas");
+          await loadTextureCanvas(textureUrl(model,p.assets,slot),source);
+          const scale=Math.min(1,360/Math.max(source.width,source.height));
+          cv.width=Math.max(1,Math.round(source.width*scale));cv.height=Math.max(1,Math.round(source.height*scale));
+          const ctx=cv.getContext("2d")!;ctx.fillStyle="#777777";ctx.fillRect(0,0,cv.width,cv.height);ctx.drawImage(source,0,0,cv.width,cv.height);
+          image=cv.toDataURL("image/jpeg",.78);
+        }
+        signal.throwIfAborted();
+        return {resourceId:model.id,name:model.name,textures:textures.map(x=>({index:x.index,name:x.name,edited:!!model.textureOverrides?.[x.index]})),
+          ...(image ? {artifact:{name:"贴图预览.jpg",mime:"image/jpeg",preview:image},...(canShare ? {previewImage:image} : {})} : {}),
+          motion:motion && {...motion,motionFile:undefined,curves:motion.curves.slice(offset,offset+16),curveCount:motion.curves.length},
+          motions:model.assets.filter(a=>a.kind==="motion").slice(offset,offset+32).map(({id,name,duration,fps,curves})=>({id,name,duration,fps,curves:curves.length})),
+          parameters:parameters.slice(offset,offset+48),parameterCount:parameters.length};
+      }
+      const values=objectArgument(args.values);
+      let next:Scene,result:unknown;
+      if(args.action==="rename") {
+        const name=checkedModelName(values.name);
+        next=produce(p,d=>{d.models.find(m=>m.id===model.id)!.name=name;});
+      } else if(args.action==="motion") {
+        const original=typeof values.id==="string" ? model.assets.find(a=>a.id===values.id && a.kind==="motion") : newMotion();
+        if(!original) throw Error("找不到要编辑的动作");
+        const modelLayer=p.layers.find(l=>l.model?.resourceId===model.id);
+        let parameters=modelLayer ? params(modelLayer.id) : [];
+        if(!parameters.length && Array.isArray(values.curves) && values.curves.length) {
+          const catalog=await getMontageRenderer().parameters(preprocessingScene(p,model.id));
+          parameters=catalog.get("@preprocess:"+model.id)??[];
+        }
+        const asset=await saveMotion(editMotion(values,original,parameters));
+        next=produce(p,d=>storePresetMotion(d,model.id,asset));
+        result={id:asset.id,name:asset.name,duration:asset.duration,curveCount:asset.curves.length,format:"motion3.json"};
+      } else if(args.action==="paint") {
+        const slots=await textureCatalog(model),slot=slots.find(s=>s.index===values.index);
+        if(!slot) throw Error("贴图索引无效");
+        const canvas=document.createElement("canvas");
+        const strokes=checkedStrokes(values.strokes);
+        await loadTextureCanvas(textureUrl(model,p.assets,slot),canvas);
+        for(const stroke of strokes) drawTextureStroke(canvas.getContext("2d")!,stroke);
+        const asset=await saveTexture(canvas);
+        next=produce(p,d=>applyTextureCopy(d,model.id,slot.index,asset));
+        result={index:slot.index,assetId:asset.id,width:asset.width,height:asset.height};
+      } else throw Error("未知模型编辑操作");
+      signal.throwIfAborted();
+      if(p!==activeDesignScene(canvasId)) throw Error("模型编辑期间画布已变更");
+      const state=previewDesign(next,"模型素材编辑",undefined,canvasId);
+      return {...state,result};
+    }
+    if (name==="editor_inspect") {
+      if (args.section==="selection") {
+        if(!local) return {revision,canvasId,layers:[],primary:"",playhead:head};
+        const clips=p.tracks.flatMap(t=>t.clips).filter(c=>selection.includes(c.id) || c.id===binding.clipId);
+        const property=propertiesOf(p,binding.layerId,Array.from(params(binding.layerId)))
+          .find(b=>b.channel===binding.channel && b.clipId===binding.clipId);
+        const data=property && readProperty(p,binding,head);
+        const model=p.layers.find(l=>l.id===binding.layerId && l.model);
+        const effective=property && binding.channel.startsWith("param:") && model
+          ? modelValues(p,model,Array.from(params(model.id)),head)[binding.channel.slice(6)] : data?.value;
+        const audio=p.assets.find(a=>a.kind==="audio" && a.id===selectedLibraryAudio.current);
+        return {revision,playhead:head,layers:selectedIds,primary:selected,view:workspaceMode==="preprocess" ? workspaceMode : spatialView ? "spatial" : "camera",
+          control:focused, binding:property ? binding : undefined,curve,
+          libraryAudio:audio && {id:audio.id,name:audio.name,duration:audio.duration,lipCues:audio.cues?.length??0},
+          property:property && data && {...data,base:property.base,value:effective??data.value,totalKeys:data.keys.length,keys:data.keys.slice(0,32)},
+          clips:clips.map(({gainKeys,disabledIds,...c})=>{
+            const asset=p.assets.find(a=>a.id===c.assetId);
+            return {...c,gainKeys:gainKeys.length,disabledIds:disabledIds.length,
+              audio:asset?.kind==="audio" ? {id:asset.id,name:asset.name,duration:asset.duration,lipCues:asset.cues?.length??0} : undefined};
+          })};
+      }
+      const id=args.id==="selected" || (args.id===undefined && ["layer","property","model_params","text_animation"].includes(String(args.section)))
+        ? args.section==="property" ? binding.layerId : targetSelected : args.id;
+      return {revision,...inspectDesignScene(p,{...args,id,
+        channel:args.channel??(args.section==="property" && id===binding.layerId ? binding.channel : undefined),
+        clipId:args.clipId??(args.section==="property" && id===binding.layerId ? binding.clipId : undefined),
+      },head,targetSelected,params)};
+    }
+    if (name==="editor_edit" || name==="editor_shader" || name==="editor_light") {
+      let requested=args.edits;
+      if (name==="editor_shader") {
+        const picked=shaderTargets(p).find(t=>t.id===targetSelected && t.available);
+        requested=[{op:"shader",id:args.target ?? (!montageMode ? picked?.id : undefined) ?? "output",shader:args.shader}];
+      }
+      if (name==="editor_light") {
+        const cam=animatedCamera(p,head);
+        const position=args.position===undefined ? {x:cam.x-p.width*.18/cam.zoom,y:cam.y-p.height*.12/cam.zoom,
+          z:cam.z-Math.min(500,cam.focalLength*.45)} : objectArgument(args.position);
+        requested=[
+          {op:"add_layer",kind:"light",as:"light",name:args.name??"场景光源"},
+          {op:"light",id:"$light",values:{type:args.type??"point",...(args.color===undefined?{}:{color:args.color}),
+            ...(args.intensity===undefined?{}:{intensity:args.intensity}),...(args.range===undefined?{}:{range:args.range}),
+            ...(args.targets===undefined?{}:{targets:args.targets})}},
+          {op:"transform",id:"$light",values:position},
+          {op:"lighting",values:{enabled:true}},
+        ];
+      }
+      const edits=Array.isArray(requested) ? requested.map(value=>{
+        const e={...objectArgument(value)};
+        if (e.id==="selected") e.id=["clip","split_clip","remove_clip","duplicate_clip"].includes(String(e.op))
+          ? curve?.binding.clipId ?? selection[0] ?? binding.clipId : targetSelected;
+        if (["property","curve_preset","curve_key","keyframes"].includes(String(e.op))) {
+          if (e.layerId===undefined || e.layerId==="selected") e.layerId=binding.layerId;
+          if (e.layerId===binding.layerId && e.channel===undefined) e.channel=binding.channel;
+          if (e.layerId===binding.layerId && e.channel===binding.channel && e.clipId===undefined) e.clipId=binding.clipId;
+          if (e.op==="property" && e.time===undefined) e.time=head;
+          if (e.op==="curve_preset" && e.segment===undefined && curve?.index!==undefined) e.segment=curve.index;
+          if (e.op==="curve_key" && e.index===undefined && curve?.index!==undefined) e.index=curve.index;
+        }
+        if (e.layerId==="selected") e.layerId=targetSelected;
+        return e;
+      }) : requested;
+      const edited=editDesignScene(p,edits,params);
+      const graphEdit=Array.isArray(edits) ? edits.filter(e=>e.op==="shader" || e.op==="replace_graph" ||
+        (e.op==="graph" && e.scope!=="text")).at(-1) : undefined;
+      const resolve=(id:unknown)=>typeof id==="string" ? (id.startsWith("$") ? edited.created[id.slice(1)] : id) : undefined;
+      const graphTarget=graphEdit?.scope==="preprocess" && typeof graphEdit.resourceId==="string" ?
+        "@preprocess:"+graphEdit.resourceId : resolve(graphEdit?.id);
+      const state=previewDesign(edited.scene,typeof args.label==="string" ? args.label.slice(0,80) :
+        name==="editor_light" ? "场景灯光" : name==="editor_shader" ? "GLSL 着色器" : "场景设计",graphTarget,canvasId);
+      const newLayers=edited.scene.layers.filter(l=>!p.layers.some(before=>before.id===l.id));
+      const light=newLayers.find(l=>l.light);
+      if (light && local && !montageMode) {
+        setManagerTab("layers");
+        selectLayer(light.id);
+      }
+      const focuses=new Map<string,AgentFocus>();
+      for (const l of newLayers) if (l.kind!=="audio")
+        focuses.set(l.id,{layerId:l.id,label:l.light ? "放置灯光" : "放置 "+l.name});
+      for (const e of Array.isArray(edits) ? edits : []) {
+        const id=e.op==="camera" ? "@camera" : e.op==="canvas" ? "output" : resolve(e.layerId ?? e.id);
+        const clip=clipById(p,id);
+        const layerId=clip?.layerId ?? id;
+        const l=edited.scene.layers.find(l=>l.id===layerId);
+        const old=p.layers.find(l=>l.id===layerId);
+        if (!layerId || (layerId!=="@camera" && layerId!=="output" && (!l || l.kind==="audio" || l===old))) continue;
+        const fields=(e.op==="transform" || e.op==="camera") && e.values && typeof e.values==="object" ? Object.keys(e.values) : [];
+        const channel=typeof e.channel==="string" ? e.channel : fields.length===1 ? fields[0] : "";
+        const handle=agentHandle(channel);
+        focuses.set(layerId,{layerId,handle,label:focuses.get(layerId)?.label ?? (l ? "调整 "+l.name : layerId==="output" ? "调整画布" : "调整相机")});
+      }
+      if (graphTarget && !graphTarget.startsWith("@preprocess:"))
+        focuses.set(graphTarget,{layerId:graphTarget,label:"调整着色"});
+      if (local && focuses.size) agentActivity.point(...focuses.values());
+      else if (local && edited.scene!==p) agentActivity.point({layerId:graphTarget?.startsWith("@preprocess:") ? graphTarget : undefined,label:"更新场景"});
+      const graph=graphTarget && agentPostGraph(edited.scene,graphTarget);
+      const lights=worldLights(edited.scene,head);
+      return {...state,created:edited.created,operations:edited.changes,
+        layers:newLayers.map(l=>({id:l.id,name:l.name,kind:l.shape ? "shape" : l.kind})),
+        light:light && {id:light.id,active:lights.some(l=>l.id===light.id),world:lights.find(l=>l.id===light.id)?.position,
+          receivers:edited.scene.layers.filter(l=>lights.some(w=>w.id===light.id && lightAffects(edited.scene,w,l))).map(l=>l.id)},
+        graph:graph && {target:graphTarget,output:graph.output,activeNodes:graphOrder(graph).map(n=>n.id)}};
+    }
+    if (name==="editor_view") {
+      if(!local) throw Error("使用 montage_view 打开画布后再操作编辑器视图");
+      switch (args.action) {
+        case "seek": seek(numberArgument(args.time,0,p.duration,"播放头")); break;
+        case "select":
+          if (typeof args.id!=="string" || (args.id!=="@camera" && !p.layers.some(l=>l.id===args.id))) throw Error("找不到要选中的图层");
+          selectLayer(args.id); agentActivity.point({layerId:args.id,label:"选中对象"}); break;
+        case "view":
+          if (args.mode==="preprocess") {
+            if (typeof args.id!=="string" || !p.models.some(m=>m.id===args.id)) throw Error("请指定预处理模型资源");
+            openPreprocess(args.id);
+          } else if (args.mode==="curves") {
+            setWorkspaceMode("scene");openCurves();
+          } else if (args.mode==="camera" || args.mode==="spatial") {
+            setWorkspaceMode("scene");toggleSpatial(args.mode==="spatial");
+          } else throw Error("未知编辑视图");
+          break;
+        case "play": setPlaying(true);break;
+        case "pause": setPlaying(false);break;
+        case "prepare_export":
+          if (!["mp4","hevc","gif","webm","prores","png"].includes(String(args.format))) throw Error("导出格式无效");
+          setExportScope("canvas");setExportFormat(String(args.format));setOnlyWork(args.range==="work_area");setExportResult(null);setExportStatus("");setProgress(0);setModal("export");break;
+        default: throw Error("未知视图操作");
+      }
+      return {status:"ready",action:args.action,revision};
+    }
+    if (name==="editor_render") {
+      if (!r || busyRef.current || !ready) throw Error("画布正在加载或导出");
+      const time=args.time===undefined ? head : numberArgument(args.time,0,p.duration,"预览时间");
+      let image:string;
+      if(!local || montageMode) image=await getMontageRenderer().renderCanvas(p,time,false) as string;
+      else {
+        await r.ensure(p,sRef.current);
+        image=r.captureShaderPreview(p,previewFrameTime(p.duration,p.fps,time),true);
+      }
+      if (signal.aborted || busyRef.current || p!==activeDesignScene(canvasId)) throw Error("预览目标已变更");
+      return {status:"ready",time,width:p.width,height:p.height,revision,visual:canShare,
+        artifact:{name:"画布预览.jpg",mime:"image/jpeg",preview:image},
+        ...(canShare ? {previewImage:image} : {})};
+    }
+    if (name==="editor_deliver") {
+      const format=String(args.format);
+      const filename=(typeof args.name==="string" ? args.name : p.name).replace(/[<>:"/\\|?*\x00-\x1f]/g,"_").slice(0,100).trim() || "FrameStudio";
+      let blob:Blob,preview:string|undefined;
+      if (format==="png") {
+        if (!r || busyRef.current || !ready) throw Error("画布正在加载或导出");
+        const time=args.time===undefined ? head : numberArgument(args.time,0,p.duration,"交付时间");
+        if(!local || montageMode) blob=await getMontageRenderer().renderCanvas(p,time,true) as Blob;
+        else {
+          await r.ensure(p,sRef.current);
+          if (p!==activeDesignScene(canvasId)) throw Error("交付目标已变更");
+          signal.throwIfAborted();
+          try {
+            const frameTime=previewFrameTime(p.duration,p.fps,time);
+            preview=r.captureShaderPreview(p,frameTime,true);
+            r.renderAt(p,frameTime,true);
+            blob=await r.png();
+          } finally {r.invalidate();}
+        }
+      } else if (format==="livemg") {
+        const res=await fetch("/api/project-save?format=livemg",{method:"POST",signal,
+          headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({project:p})});
+        if (!res.ok) throw Error((await res.json()).error);
+        blob=await res.blob();
+      } else if (format==="svg") {
+        const l=p.layers.find(l=>l.id===(args.id==="selected" ? selected : args.id));
+        const shape=l?.shape ?? validateShape({kind:"svg",svg:args.content});
+        blob=new Blob([shapeSvg(shape,l?.width,l?.height)],{type:"image/svg+xml"});
+      } else if (format==="json" || format==="txt") {
+        const content=typeof args.content==="string" ? args.content : JSON.stringify(args.content,null,2);
+        if (content===undefined || content.length>500000) throw Error("文件内容为空或超过 500 KB");
+        if (format==="json") JSON.parse(content);
+        blob=new Blob([content],{type:format==="json" ? "application/json" : "text/plain"});
+      } else throw Error("不支持的交付格式");
+      signal.throwIfAborted();
+      const name=filename.toLowerCase().endsWith("."+format) ? filename : filename+"."+format;
+      return {status:"ready",revision,delivery:{name,size:blob.size,mime:blob.type},
+        artifact:{name,mime:blob.type,blob,preview}};
+    }
+    if (name==="editor_analyze_audio") {
+      const assetId=args.id===undefined || args.id==="selected" ? local ? selectedMedia?.id ?? selectedLibraryAudio.current : undefined : args.id;
+      const a=p.assets.find(a=>a.id===assetId && a.kind==="audio");
+      if (!a) throw Error("请指定已导入的音频素材");
+      if (a.cues?.length) return {status:"ready",asset:a.id,cues:a.cues.length,revision};
+      const data=await api("audio-analyze",{path:a.path});
+      if (signal.aborted || p!==activeDesignScene(canvasId)) throw Error("音频分析期间工程已变更");
+      const next=produce(p,s=>{
+        const media=s.assets.find(v=>v.id===a.id)!;
+        media.cues=data.cues;media.analysis=data.analysis;
+      });
+      const state=previewDesign(next,"口型分析",undefined,canvasId);
+      return {...state,asset:a.id,cues:data.cues?.length ?? 0};
+    }
+    if (name==="graph_context")
+      return {width:p.width,height:p.height,time:head,selected,targets:shaderTargets(p),revision};
+    const target=args.target;
+    if (typeof target!=="string" || !shaderTargets(p).some(t=>t.id===target && t.available))
+      throw Error("请指定可编辑的后处理目标");
+    const graph=currentPostGraph(p,target);
+    if (name==="graph_read") return {target,graph,draft:!!designRef.current,revision};
+    if (name!=="graph_edit") throw Error("未知工具");
+    const edited=editDesignScene(p,[{op:"graph",id:target,edits:args.edits}],params);
+    const output=currentPostGraph(edited.scene,target);
+    const shader=output.nodes.find(n=>"@"+n.id===output.output && n.op==="glsl")?.inputs.shader as CodeShader | undefined;
+    const state=previewDesign(edited.scene,shader?.name ?? output.name,target,canvasId);
+    agentActivity.point({layerId:target,label:"调整着色"});
+    return {...state,target,output:output.output,nodes:output.nodes.map(n=>({id:n.id,type:n.op})),activeNodes:graphOrder(output).map(n=>n.id)};
+  }
+  const shaderAgent = useShaderAgent({
+    context: shaderContext,
+    version: target => postRevision(sRef.current,target),
+    read: readPostGraph,
+    preview: candidate => {
+      const {target,shader,edits} = candidate;
+      const base = readPostGraph(target).graph;
+      const graph = shader ? appendShader(base,shader) : editAgentGraph(base,edits);
+      previewPostGraph(target,graph);
+      shaderDraftRef.current = undefined;
+      setShaderDraft(undefined);
+      return graph;
+    },
+    apply: (target, graph) => {
+      if (rRef.current?.shaderPreview?.graph !== graph) throw Error("预览已被替换，请重新试渲染");
+      savePostGraph(target,graph,true);
+    },
+    clear: clearShaderPreview,
+    capture: () => rRef.current!.captureShaderPreview(sRef.current, tRef.current),
+  });
+  const graphCanvas=graphLocation?.canvasId
+    ? montagePreview?.canvases.find(c=>c.id===graphLocation.canvasId)
+    : undefined;
+  const graphScene=graphLocation?.canvasId ? graphCanvas?.scene : inspection;
+  const foreignGraph=!!graphCanvas && graphCanvas.id!==montagePreview?.activeCanvasId;
+  const editorDraft = graphTarget && !foreignGraph && rRef.current?.shaderPreview?.target === graphTarget
+    ? rRef.current.shaderPreview.graph : undefined;
+  function agentPostGraph(s:Scene,target:string) {
+    if (target.startsWith("@preprocess:"))
+      return s.models.find(m=>m.id===target.slice(12))?.preprocess?.effects.graph;
+    return currentPostGraph(s,target);
+  }
+  const masterGraph=useMemo(()=>montagePreview && (montagePreview.outputGraph??emptyGraph("post","总成片效果")),[montagePreview]);
+  const nodeTargets=graphTarget==="@master" ? [{id:"@master",name:"总成片效果",available:true}]
+    : !graphScene ? [] : [
+      ...shaderTargets(graphScene).map(t=>({...t,name:t.id==="output" ? "画布输出效果" : t.name+" · 图层效果"})),
+      ...graphScene.models.map(m=>({id:"@preprocess:"+m.id,name:m.name+" · 素材预处理",available:true})),
+    ];
+  const nodeTarget=nodeTargets.find(target=>target.id===graphTarget);
+  const editorGraph = useMemo(() => {
+    if (graphTarget==="@master") return masterGraph;
+    if (!graphTarget || !graphScene || !nodeTarget) return undefined;
+    return editorDraft ?? agentPostGraph(graphScene,graphTarget) ?? emptyGraph("post","素材预处理");
+  },[graphScene,graphTarget,!!nodeTarget,editorDraft,masterGraph]);
+  const graphScope=graphTarget==="@master"
+    ? montagePreview?.name
+    : graphScene?.name;
+  const editorAgentDraft=visibleMontageDraft ?? designDraft ?? shaderDraft;
+  const draftScope=editorAgentDraft?.target==="@master" ? "总成片效果"
+    : editorAgentDraft?.target ? postScopeName(
+        visibleMontageDraft?.value.canvases.find(c=>c.id===visibleMontageDraft.targetCanvasId)?.scene ?? inspection,
+        editorAgentDraft.target)
+    : undefined;
+  const agentMontageClip=montagePreview?.clips.find(clip=>clip.id===montageSelection);
+  const agentMontageSource=montagePreview?.canvases.find(canvas=>canvas.id===agentMontageClip?.canvasId);
+  function postScopeName(source:Scene,target:string) {
+    if (target==="output") return source.name+" / 画布输出效果";
+    const model=target.startsWith("@preprocess:") && source.models.find(m=>m.id===target.slice(12));
+    if (model) return source.name+" / "+model.name+" / 素材预处理";
+    const layer=source.layers.find(l=>l.id===target);
+    return layer ? source.name+" / "+layer.name+" / 图层效果" : source.name;
+  }
+  function writeScopedGraph(target:string,graph:EffectGraph) {
+    if (busyRef.current || draftLocked()) throw Error("请确认草稿并等待当前操作结束");
+    if (target==="@master") {changeMasterGraph(graph);return;}
+    const canvasId=graphLocation?.canvasId;
+    if (foreignGraph && canvasId) {
+      const project=currentMontage();
+      const source=project?.canvases.find(c=>c.id===canvasId);
+      if (!project || !source) throw Error("找不到节点所属的画布");
+      const result=editDesignScene(source.scene,[{op:"replace_graph",id:target,graph,
+        ...(target.startsWith("@preprocess:") ? {scope:"preprocess",resourceId:target.slice(12)} : {})}]);
+      rRef.current?.probePostGraph(graph);
+      applyMontage(withMontageCanvas(project,canvasId,result.scene));
+      return;
+    }
+    rRef.current?.probePostGraph(graph);
+    if (target.startsWith("@preprocess:")) {
+      change(s=>{
+        const model=s.models.find(m=>m.id===target.slice(12));
+        if (!model) throw Error("找不到模型素材");
+        model.preprocess ??= {enabled:true,effects:sceneEffects()};
+        model.preprocess.effects.graph=graph;
+      });
+      setPreprocessOriginal(false);
+    } else savePostGraph(target,graph);
+  }
+  function changeMasterGraph(graph?:EffectGraph) {
+    const p=activeMontage();
+    if(!p) throw Error("找不到总时间线");
+    if(montageDraftRef.current) throw Error("确认草稿后即可编辑节点");
+    const next=editMontage(p,[{op:"graph",graph:graph??null}]).montage;
+    if(graph) rRef.current?.probePostGraph(graph);
+    applyMontage(next);
+  }
+
   function seek(t: number) {
     stopMotionPreview();
-    tRef.current = clamp(t, 0, sRef.current.duration);
+    tRef.current = clamp(t, 0, designRef.current?.base === sRef.current ? designRef.current.scene.duration : sRef.current.duration);
     setTime(tRef.current);
     rRef.current?.invalidate();
     syncRef.current();
   }
   function selectLayer(id: string) {
+    focusedControl.current=undefined;
     stopMotionPreview();
     setSelection([]);
     if (channel === "gain" || channel.startsWith("motion:") || id === "@camera")
       setChannel("x");
-    if (sRef.current.layers.find((l) => l.id === id)?.model)
+    if ((designRef.current?.scene ?? sRef.current).layers.find((l) => l.id === id)?.model)
       setMotionTargetId(id);
     setSelected(id);
     setSelectedIds(id && id !== "@camera" ? [id] : []);
@@ -519,7 +1462,7 @@ export default function TheaterApp() {
     setInspector(
       id === "@camera"
         ? "camera"
-        : sRef.current.layers.find((l) => l.id === id)?.kind === "audio"
+        : (designRef.current?.scene ?? sRef.current).layers.find((l) => l.id === id)?.kind === "audio"
           ? "audio"
           : "layer",
     );
@@ -561,15 +1504,23 @@ export default function TheaterApp() {
     }
   }
   function undo() {
-    if (!history.current.length) return;
-    future.current.push(sRef.current);
+    if(restoreMontageDraft()) return;
+    if (draftLocked() || !history.current.length) return;
+    const entry=appliedDraft.current,after=sRef.current;
+    future.current.push(after);
     const p = history.current.pop()!;
     sRef.current = p;
     setScene(p);
+    if(entry?.kind==="scene" && entry.after===after && entry.draft.base===p) {
+      appliedDraft.current=undefined;
+      const draft={...entry.draft,base:p,revision:++designRevision.current};
+      designRef.current=draft;setDesignDraft(draft);
+    }
     rRef.current?.invalidate();
     setHistoryVersion((v) => v + 1);
   }
   function redo() {
+    if(draftLocked()) return;
     if (!future.current.length) return;
     history.current.push(sRef.current);
     const p = future.current.pop()!;
@@ -578,13 +1529,17 @@ export default function TheaterApp() {
     rRef.current?.invalidate();
     setHistoryVersion((v) => v + 1);
   }
-  async function loadScene(s: Scene) {
+  async function loadScene(s: Scene, keepDocument=false) {
+    if(!keepDocument) shaderDocument.current = crypto.randomUUID();
+    clearDesignDraft();
+    clearShaderPreview();
+    setGraphTarget(undefined);
     setWorkspaceMode("scene");
     toggleSpatial(false);
     if (rRef.current) rRef.current.orbit = undefined;
     stopMotionPreview();
     setBusy("载入场景与独立模型控制器…");
-    setReady(false);
+    setReady(false);playRef.current=false;
     try {
       const p = freeze(migrateScene(s), true);
       setCurveSeed(undefined);
@@ -600,10 +1555,11 @@ export default function TheaterApp() {
       await rRef.current!.ensure(p);
       rRef.current!.exportBackground = undefined;
       rRef.current!.invalidate();
-      rRef.current!.renderAt(p, 0);
+      if(rRef.current!.host.clientWidth>0) rRef.current!.renderAt(p,0);
       setReady(true);
       const firstModel = p.layers.find((l) => l.kind === "model")?.id || "";
       setSelected(firstModel);
+      setInspector("layer");
       setSelectedIds(firstModel ? [firstModel] : []);
       rRef.current!.selected = firstModel;
       rRef.current!.selectedIds = firstModel ? [firstModel] : [];
@@ -688,15 +1644,22 @@ export default function TheaterApp() {
         if (!live) return;
         api<Partial<Preferences>>("preferences")
           .then((value) => {
-            if (live) setPreferences(normalizePreferences(value));
+            if (!live) return;
+            const next=normalizePreferences(value);
+            setPreferences(next);setSnap(next.defaultSnap);setAutoKey(next.defaultAutoKey);
+            setViewGrid(next.defaultGrid);r.showGrid=next.defaultGrid;r.invalidate();
           })
           .catch(() => {})
           .finally(() => {
             if (live) setPreferencesReady(true);
           });
         setModelEntries(info.models);
-        const saved = await api<Scene | null>("scene-autosave");
-        if (saved) {
+        const saved = await api<Scene | Montage | null>("scene-autosave");
+        if (isMontage(saved)) {
+          const p=loadMontage(saved);
+          updateMontage(p);setMontageMode(true);
+          await loadScene(p.canvases.find(c=>c.id===p.activeCanvasId)!.scene);
+        } else if (saved) {
           await loadScene(saved);
         } else {
           const old = await api("autosave");
@@ -752,11 +1715,12 @@ export default function TheaterApp() {
     return () => query.removeEventListener("change", apply);
   }, [appearance, accent]);
   useEffect(() => {
+    if(montageMode) return;
     rRef.current
-      ?.ensure(displayScene)
+      ?.ensure(displayScene,visibleDesign ? scene : undefined)
       .then(() => rRef.current?.invalidate())
       .catch((e) => notify(e.message));
-  }, [displayScene.layers, displayScene.models, displayScene.assets]);
+  }, [displayScene.layers, displayScene.models, displayScene.assets,montageMode]);
   useEffect(() => {
     const r = rRef.current;
     if (!r) return;
@@ -771,13 +1735,18 @@ export default function TheaterApp() {
     }
   }, [workspaceMode]);
   useEffect(() => {
-    if (!ready || busy) return;
-    const timer = setTimeout(
-      () => api("scene-autosave", scene).catch(() => {}),
-      1300,
-    );
+    if (!ready || busy || !preferences.autoSave) return;
+    const timer=setTimeout(()=>{
+      sceneSaveQueue.current=sceneSaveQueue.current.then(async()=>{
+        await api("scene-autosave",montageCommitted??scene);
+      }).catch(()=>{});
+    },preferences.autosaveDelay*1000);
     return () => clearTimeout(timer);
-  }, [scene, ready, busy]);
+  }, [scene, montageCommitted, ready, busy,preferences.autoSave,preferences.autosaveDelay]);
+  useEffect(()=>window.studioDesktop?.onSaveBeforeClose?.(async()=>{
+    await sceneSaveQueue.current;
+    await api("scene-autosave",currentMontage()??sRef.current);
+  }),[]);
   useEffect(() => {
     if (rRef.current) {
       rRef.current.previewLimit = quality;
@@ -803,7 +1772,7 @@ export default function TheaterApp() {
       last = now;
       if (modeRef.current === "scene" && playRef.current && !busyRef.current) {
         let t = tRef.current + dt;
-        const p = sRef.current;
+        const p = displayRef.current;
         if (t >= p.workArea.end) {
           if (p.workArea.loop) t = p.workArea.start;
           else {
@@ -821,7 +1790,8 @@ export default function TheaterApp() {
       }
       const r = rRef.current,
         p = displayRef.current,
-        t = modeRef.current === "preprocess" ? 0 : tRef.current;
+        t=modeRef.current==="preprocess" ? 0 : tRef.current,
+        frameTime=previewFrameTime(p.duration,p.fps,t);
       const audition = motionPreviewRef.current;
       if (
         audition?.playing &&
@@ -845,9 +1815,10 @@ export default function TheaterApp() {
       } else auditionLast.current = 0;
       if (
         ready &&
+        !montageMode &&
         !busyRef.current &&
         r &&
-        r.needsRender(p, t) &&
+        r.needsRender(p,frameTime) &&
         now - paint >=
           1000 / Math.min(30, Math.max(p.fps, audition?.fps || 0)) - 1
       ) {
@@ -864,7 +1835,13 @@ export default function TheaterApp() {
               : undefined;
           if (alternate?.spatial && !alternate.orbit)
             alternate.orbit = fitOrbit(p, t);
-          r.renderViews(p, t, alternate);
+          r.renderViews(p,frameTime,alternate);
+          agentActivity.publish(r.snapshot,alternate?.snapshot);
+          const snap=r.snapshot,id=poseActor.current;
+          if(id && snap) {
+            const hit=snap.hits.find(item=>item.id===id);
+            poseStore.publish(hit?.points.length===4 ? {points:hit.points,width:snap.width,height:snap.height} : undefined);
+          }
         } catch (e: any) {
           console.error(e);
           playRef.current = false;
@@ -898,9 +1875,9 @@ export default function TheaterApp() {
     }
     raf.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf.current);
-  }, [ready]);
+  }, [ready,montageMode]);
   syncRef.current = () => {
-    const p = sRef.current,
+    const p = modeRef.current === "scene" ? displayRef.current : sRef.current,
       t = tRef.current,
       playing = playRef.current && !busyRef.current,
       activeIds = new Set<string>();
@@ -930,7 +1907,7 @@ export default function TheaterApp() {
   };
   useEffect(() => {
     syncRef.current();
-  }, [scene, time, busy]);
+  }, [scene, designDraft, time, busy]);
   function stopMotionPreview() {
     motionPreviewRef.current = undefined;
     auditionLast.current = 0;
@@ -1000,6 +1977,7 @@ export default function TheaterApp() {
     rRef.current!.invalidate();
   }
   function previewAudio(a: MediaAsset) {
+    selectedLibraryAudio.current=a.id;
     stopMotionPreview();
     if (previewId === a.id) {
       preview.current?.pause();
@@ -1030,7 +2008,10 @@ export default function TheaterApp() {
     });
   }
   function openPreprocess(id = resource?.id || scene.models[0]?.id || "") {
+    if(modeRef.current==="preprocess" && id!==preprocessId && !allowWorkbenchExit())return;
     setPreprocessOriginal(false);
+    setWorkbenchTab("look");
+    setSelectedControl("");
     stopMotionPreview();
     setPlaying(false);
     playRef.current = false;
@@ -1041,7 +2022,6 @@ export default function TheaterApp() {
     setPreprocessId(id);
     setWorkspaceMode("preprocess");
     setLibraryTab("model");
-    setCurveOpen(false);
     setInspectorOpen(true);
   }
   function addLight(type: SceneLight["type"]) {
@@ -1082,7 +2062,7 @@ export default function TheaterApp() {
     selectLayer(l.id);
     setWorkspaceMode("scene");
   }
-  function addLayer(kind: Layer["kind"]) {
+  function addLayer(kind: Layer["kind"], geometry = false) {
     document
       .querySelector<HTMLDetailsElement>(".layer-title details")
       ?.removeAttribute("open");
@@ -1103,14 +2083,15 @@ export default function TheaterApp() {
       l.transform.y = scene.height * 0.3;
     }
     if (kind === "color") {
-      l.width = scene.width;
-      l.height = scene.height;
+      l.width = geometry ? 320 : scene.width;
+      l.height = geometry ? 240 : scene.height;
+      if (geometry) { l.shape = {...defaultShape}; l.name = "几何图形"; }
     }
     change((s) => {
       if (kind === "group") s.layers.push(l);
       else {
         addVisual(s, l, tRef.current, Math.max(0.1, s.duration - tRef.current));
-        if (kind === "color") {
+        if (kind === "color" && !geometry) {
           s.layers = s.layers.filter((x) => x.id !== l.id);
           s.layers.unshift(l);
         }
@@ -1255,36 +2236,9 @@ export default function TheaterApp() {
     change((s) => {
       for (const tr of s.tracks)
         for (const c of [...tr.clips])
-          if (
-            selection.includes(c.id) &&
-            now > c.start &&
-            now < c.start + c.duration
-          ) {
-            const copy = {
-              ...cloneData(c),
-              id: uid(),
-              start: now,
-              duration: c.start + c.duration - now,
-              trimIn: c.trimIn + (now - c.start) * c.speed,
-              fadeIn: 0,
-            };
-            if (c.kind === "audio" && c.gainKeys.length) {
-              const cut = now - c.start,
-                value = sampleKeys(c.gainKeys, cut, 1);
-              copy.gainKeys = [
-                { t: 0, v: value, mode: "linear" },
-                ...cloneData(c.gainKeys)
-                  .filter((k) => k.t > cut)
-                  .map((k) => ({ ...k, t: k.t - cut })),
-              ];
-              c.gainKeys = [
-                ...c.gainKeys.filter((k) => k.t < cut),
-                { t: cut, v: value, mode: "linear" },
-              ];
-            }
-            c.duration = now - c.start;
-            c.fadeOut = 0;
-            tr.clips.push(copy);
+          if (selection.includes(c.id)) {
+            const right=splitSceneClip(c,now);
+            if (right) tr.clips.push(right);
           }
     });
   }
@@ -1499,7 +2453,9 @@ export default function TheaterApp() {
     r.invalidate();
     return c.toDataURL("image/png");
   }
-  async function saveProject() {
+  async function saveProject(scope:"workspace"|"canvas"="workspace") {
+    const project=scope==="canvas" ? sRef.current : currentMontage() ?? sRef.current;
+    const filename=project.name+(isMontage(project) ? ".livemgs" : ".livemg");
     try {
       setBusy("打包 .livemg 工程与全部资源…");
       const res = await fetch("/api/project-save?format=livemg", {
@@ -1509,20 +2465,21 @@ export default function TheaterApp() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          project: sRef.current,
-          thumbnail: await projectThumbnail(),
+          project,
+          thumbnail: isMontage(project) ? undefined : await projectThumbnail(),
+          options:isMontage(project) ? {container:true,embedCanvases:preferences.embedCanvases} : {includeAssets:preferences.embedSingle},
         }),
       });
       if (!res.ok) throw Error((await res.json()).error);
       const blob = await res.blob();
       if (window.studioDesktop?.saveFile) {
         const saved = await window.studioDesktop.saveFile(
-          sRef.current.name + ".livemg",
+          filename,
           await blob.arrayBuffer(),
         );
         if (saved.canceled) return;
-      } else download(blob, sRef.current.name + ".livemg");
-      setDirty(false);
+      } else download(blob,filename);
+      if(scope==="workspace") setDirty(false);
       notify("工程已保存：模型、媒体、字体、控制器与动画均已打包");
     } catch (e: any) {
       notify(e.message);
@@ -1533,10 +2490,15 @@ export default function TheaterApp() {
   async function openProject(file: File) {
     setBusy("校验并读取工程资源…");
     try {
-      const p = await api("project-open?format=livemg", file);
+      const input = await api<Scene|Montage>("project-open?format=livemg", file);
+      const p=isMontage(input) ? loadMontage(input) : migrateScene(input);
+      resetMontage();
       history.current = [];
       future.current = [];
-      await loadScene(migrateScene(p));
+      if(isMontage(p)) {
+        updateMontage(p);setMontageMode(true);
+        await loadScene(p.canvases.find(c=>c.id===p.activeCanvasId)!.scene);
+      } else await loadScene(p);
       setDirty(false);
     } catch (e: any) {
       notify(e.message);
@@ -1546,10 +2508,14 @@ export default function TheaterApp() {
   }
   async function exportVideo() {
     if (!ready) return;
+    if (designRef.current || montageDraftRef.current) { setExportStatus("请先应用或丢弃 Agent 草稿，再导出成片。");return; }
     stopMotionPreview();
-    const p = sRef.current,
-      start = onlyWork ? p.workArea.start : 0,
-      end = onlyWork ? p.workArea.end : p.duration;
+    const p = sRef.current, master=exportScope==="montage" ? currentMontage() : undefined,
+      spec=master ?? p,
+      start = !master && onlyWork ? p.workArea.start : 0,
+      end = master ? montageEnd(master) : onlyWork ? p.workArea.end : p.duration;
+    if(end<=start) {setExportStatus("总时间线没有可导出的片段");return;}
+    playMontage(false);
     setPlaying(false);
     playRef.current = false;
     preview.current?.pause();
@@ -1561,25 +2527,30 @@ export default function TheaterApp() {
     cancel.current = false;
     let job: any;
     try {
-      await rRef.current!.ensure(p);
-      rRef.current!.exportBackground = ["mp4", "hevc", "gif"].includes(
+      if(!master) await rRef.current!.ensure(p);
+      const matte=["mp4", "hevc", "gif"].includes(
         exportFormat,
       )
         ? exportMatte
         : undefined;
+      if(!master) rRef.current!.exportBackground=matte;
       job = await api("export-start", {
-        width: p.width,
-        height: p.height,
-        fps: p.fps,
+        width: spec.width,
+        height: spec.height,
+        fps: spec.fps,
         duration: end - start,
         format: exportFormat,
-        audio: collectAudio(p, start, end),
+        audio: master ? montageAudio(master) : collectAudio(p, start, end),
       });
-      for (const n of rRef.current!.nodes.values()) n.runtime?.resetPhysics();
+      if(master) await getMontageRenderer().resetPhysics();
+      else for (const n of rRef.current!.nodes.values()) n.runtime?.resetPhysics();
       for (let i = 0; i < job.total; i++) {
         if (cancel.current) throw Error("已取消导出");
-        rRef.current!.renderAt(p, start + i / p.fps, true);
-        await api(`export-frame/${job.id}/${i}`, await rRef.current!.png());
+        const at=start+i/spec.fps;
+        let frame:Blob;
+        if(master) frame=(await getMontageRenderer().render(master,at,{matte,png:true}))!;
+        else {rRef.current!.renderAt(p,at,true);frame=await rRef.current!.png();}
+        await api("export-frame/"+job.id+"/"+i,frame);
         setProgress(((i + 1) / job.total) * 0.86);
         setExportStatus(`合成第 ${i + 1} / ${job.total} 帧`);
         await new Promise<void>((r) => setTimeout(r, 0));
@@ -1602,6 +2573,7 @@ export default function TheaterApp() {
       setBusy("");
       if (rRef.current) rRef.current.exportBackground = undefined;
       rRef.current?.invalidate();
+      if(!montageMode && master) {montageRenderer.current?.close();montageRenderer.current=undefined;}
     }
   }
   function selectProperty(binding: Binding) {
@@ -1616,8 +2588,26 @@ export default function TheaterApp() {
     if (binding.channel === "gain") setInspector("audio");
   }
   function openCurves(seed?: Binding) {
-    setCurveSeed(seed);
+    const target=seed ?? (currentBinding.layerId ? currentBinding : undefined);
+    if(seed && (seed.layerId!==currentBinding.layerId || seed.channel!==currentBinding.channel || seed.clipId!==currentBinding.clipId))
+      selectProperty(seed);
+    setCurveSeed(target);
     setCurveOpen(true);
+  }
+  function previewEffectGraph(source?: EffectGraph, output?: string) {
+    const renderer = rRef.current;
+    if (!renderer) return;
+    renderer.graphPreview = source && output ? {source,output} : undefined;
+    renderer.invalidate();
+  }
+  function graphParameterControls(layer: Layer, kind: "post"|"text") {
+    const binding = (id: string) => ({layerId:layer.id,channel:kind+"Graph."+id});
+    return {
+      value: (id:string) => readProperty(scene,binding(id),time).value,
+      onValue: (id:string,value:number,key?:boolean) => editProperty(binding(id),value,key),
+      keyed: (id:string) => !!layer.animation[binding(id).channel]?.length,
+      onPreview: previewEffectGraph,
+    };
   }
   function editProperty(binding: Binding, v: number, force = false) {
     if (!Number.isFinite(v)) return;
@@ -1649,7 +2639,9 @@ export default function TheaterApp() {
       } else if (binding.layerId === "@camera")
         (s.camera as any)[binding.channel] = v;
       else if (target) {
-        if (binding.channel.startsWith("param:") && target.model)
+        const graphParam = effectParameter(target,binding.channel);
+        if (graphParam) graphParam.value = v;
+        else if (binding.channel.startsWith("param:") && target.model)
           target.model.baseValues[binding.channel.slice(6)] = v;
         else if (binding.channel.startsWith("effects."))
           (target.effects as any)[binding.channel.slice(8)] = v;
@@ -1839,6 +2831,7 @@ export default function TheaterApp() {
     if (e.button !== 0 || busy || boxTool || e.shiftKey) return;
     e.preventDefault();
     e.stopPropagation();
+    if(draftLocked()){notify("确认草稿后即可变换对象");return;}
     const base = sRef.current,
       t = tRef.current,
       roots = selectionRoots(base, gizmo.ids);
@@ -2113,6 +3106,7 @@ export default function TheaterApp() {
     if (id) {
       const ids = selectedIds.includes(id) ? selectedIds : [id];
       if (!selectedIds.includes(id)) selectObjects(ids);
+      if(draftLocked()) return;
       const roots = selectionRoots(base, ids);
       if (!roots.length) return;
       const pivot = pivotOf(base, roots, t),
@@ -2251,8 +3245,20 @@ export default function TheaterApp() {
           return;
         }
         if (modeRef.current === "preprocess")
-          setWorkspaceMode("scene");
+          returnFromWorkbench();
         else setInspectorOpen(false);
+        return;
+      }
+      if(montageMode) {
+        if(editing || modal || busy) return;
+        const key=e.key.toLowerCase(), modifier=e.ctrlKey || e.metaKey;
+        if(modifier && key==="s") {e.preventDefault();void saveProject();}
+        if(modifier && key==="z") {e.preventDefault();stepMontageHistory(e.shiftKey);}
+        if(e.code==="Space" && target.tagName!=="BUTTON" && !e.repeat) {
+          e.preventDefault();
+          if(!montagePlaying && montagePreview && montageClock.current>=montageEnd(montagePreview)) seekMontage(0);
+          playMontage(!montagePlaying);
+        }
         return;
       }
       if (modeRef.current === "preprocess") {
@@ -2355,9 +3361,12 @@ export default function TheaterApp() {
     expandedView,
     contextMenu,
     curveOpen,
+    montageMode,montagePlaying,montagePreview,
   ]);
   useEffect(() => {
     window.theater = {
+      get montage() {return currentMontage();},
+      get displayMontage() {return montageDraftRef.current?.value ?? currentMontage();},
       get selectedObjects() {
         return selectedIds;
       },
@@ -2422,7 +3431,7 @@ export default function TheaterApp() {
     const result: { l: Layer; depth: number }[] = [];
     const children = new Map<string | null, Layer[]>();
     const visited = new Set<string>();
-    for (const l of [...scene.layers].reverse()) {
+    for (const l of [...inspection.layers].reverse()) {
       if (!children.has(l.parentId)) children.set(l.parentId, []);
       children.get(l.parentId)!.push(l);
     }
@@ -2436,7 +3445,7 @@ export default function TheaterApp() {
     }
     visit(null);
     return result;
-  }, [scene.layers, foldedGroups]);
+  }, [inspection.layers, foldedGroups]);
   const sceneActions = useMemo(() => {
     const result = new Map<string, SceneClip[]>();
     for (const track of scene.tracks) for (const clip of track.clips) {
@@ -2467,32 +3476,43 @@ export default function TheaterApp() {
       style={{
         gridTemplateRows:
           "var(--header-height) minmax(180px,1fr) " +
-          (workspaceMode === "preprocess"
-            ? "0px"
+          (montageMode || (modelWorkspace && !motionWorkspace) ? "0px"
+            : motionWorkspace ? "clamp(225px, "+modelDockHeight+"px, 54vh)"
             : `clamp(210px, ${timelineHeight + (curveOpen ? 95 : 0)}px, ${curveOpen ? 62 : 47}vh)`) +
           " 20px",
       }}
     >
-      <header className="theater-header">
+      <header className="theater-header" inert={modal==="settings"}>
         <div className="theater-brand">
           <img className="theater-brand-icon" src="/icon.svg" width={42} height={42} alt="" />
           <label className="scene-name">
             <small>
               <span className="theater-wordmark"><strong>Frame</strong>Studio</span>
-              <span>· .livemg</span>
+              <span className="studio-document-path" title={montagePreview?.name}>
+                {montageMode ? "总时间线" : montagePreview ? montagePreview.name + " / 画布" : "独立画布"}
+                {workspaceMode==="preprocess" && !montageMode ? " / 模型素材" : ""}
+              </span>
               {dirty && <i title="草稿已更改" />}
             </small>
             <input
               className="scene-title"
-              aria-label="工程名称"
-              value={scene.name}
-              onChange={(e) => change((s) => { s.name = e.target.value; })}
+              aria-label={montageMode || !montageCommitted ? "工程名称" : "画布名称"}
+              value={montageMode ? montagePreview?.name??scene.name : scene.name}
+              readOnly={montageMode ? !montageCommitted || !!montageDraft : !!visibleDesign}
+              onChange={(e) => montageMode ? editMontageUI([{op:"settings",values:{name:e.target.value}}]) : change(s=>{s.name=e.target.value;})}
             />
           </label>
         </div>
-        <div className="scene-metadata" aria-label="工程规格">
-          {scene.duration.toFixed(1)} s <span>·</span> {scene.fps} fps <span>·</span> {scene.width} × {scene.height}
-        </div>
+        <nav className="studio-mode-switch" aria-label="工作区">
+          <button aria-label={montageMode ? "返回当前画布" : "画布工作区"} aria-pressed={!montageMode}
+            disabled={!ready || !!busy} onClick={showCanvas}>
+            <Layers size={16}/><span>画布</span>
+          </button>
+          <button aria-label="总时间线" aria-pressed={montageMode} disabled={!ready || !!busy}
+            onClick={()=>{if(!montageMode)showMontage();}}>
+            <Clapperboard size={16}/><span>总时间线</span>
+          </button>
+        </nav>
         <div className="header-actions">
           <div className="action-group" aria-label="工程文件">
           <button
@@ -2503,55 +3523,83 @@ export default function TheaterApp() {
                 !confirm("新建前请确认需要的工程已经保存。继续创建空白工程？")
               )
                 return;
-              loadScene(emptyScene());
+              resetMontage();history.current=[];future.current=[];
+              const next=emptyScene();
+              next.fps=preferences.defaultFps;
+              next.workArea.end=next.duration=preferences.defaultDuration;
+              void loadScene(next);
             }}
           >
             <FilePlus2 size={17} />
           </button>
           <button
-            title="打开 .livemg 工程"
+            title="打开 .livemg / .livemgs 工程"
             onClick={() => projectInput.current?.click()}
           >
             <FolderOpen size={17} />
           </button>
-          <button title="保存 .livemg（Ctrl+S）" onClick={saveProject}>
+          <button title="保存工程（Ctrl+S）" onClick={()=>void saveProject()}>
             <Save size={17} />
           </button>
           </div>
           <div className="action-group" aria-label="编辑历史">
           <button
             title="撤销"
-            disabled={!history.current.length}
-            onClick={undo}
+            disabled={montageMode ? !montageHistory.current.past.length || !!montageDraft : !history.current.length}
+            onClick={()=>montageMode ? stepMontageHistory(false) : undo()}
           >
             <Undo2 size={17} />
           </button>
-          <button title="重做" disabled={!future.current.length} onClick={redo}>
+          <button title="重做" disabled={montageMode ? !montageHistory.current.future.length || !!montageDraft : !future.current.length}
+            onClick={()=>montageMode ? stepMontageHistory(true) : redo()}>
             <Redo2 size={17} />
           </button>
           </div>
-          <button className="header-tool" title="画布与时间设置" onClick={() => setModal("canvas")}>
+          {montage && !montageMode && <button className="header-tool" title="另存当前画布 .livemg" disabled={!!busy}
+            onClick={()=>void saveProject("canvas")}><Download size={16}/></button>}
+          <button className="header-tool" style={montageMode?{display:"none"}:undefined} title="画布与时间设置" onClick={() => setModal("canvas")}>
             <Settings2 size={16} />
-            <span>画布</span>
+            <span>画布设置</span>
           </button>
-          <AppearanceMenu
-            preferences={preferences}
-            onChange={updatePreferences}
-            ready={preferencesReady}
-          />
+          <button className="header-tool" disabled={!preferencesReady} aria-label="软件设置" onClick={()=>showSettings()}>
+            <Settings2 size={16}/><span>设置</span>
+          </button>
           <button
             className="export-button"
             disabled={!ready}
-            onClick={() => setModal("export")}
+            onClick={() => {
+              playMontage(false);setExportScope(montageMode && montage ? "montage" : "canvas");
+              setExportFormat(preferences.defaultExportFormat);
+              setExportStatus("");setExportResult(null);setModal("export");
+            }}
           >
             <ArrowUpRight size={17} />
             导出成片
           </button>
         </div>
       </header>
+      {montageMode && !montagePreview && (
+        <section className="montage-onboarding" aria-label="总时间线">
+          <Clapperboard size={32}/>
+          <h1>总时间线</h1>
+          <p>把独立画布编排成一条成片。创建后，可以继续导入或新建画布。</p>
+          <button className="primary" disabled={!!busy || !!visibleDesign || !!shaderDraft}
+            onClick={()=>{if (!currentMontage() && !draftLocked()) applyMontage(emptyMontage(sRef.current));}}>
+            <Plus size={16}/> 创建总时间线并加入当前画布
+          </button>
+        </section>
+      )}
+      {montageMode && montagePreview && <MontageWorkspace project={montagePreview} renderer={getMontageRenderer()}
+        busy={!!busy} draft={!!visibleMontageDraft} time={montageTime} selected={montageSelection}
+        select={setMontageSelection} seek={seekMontage} onTime={at=>{montageClock.current=at;}} playing={montagePlaying} play={playMontage} edit={editMontageUI}
+        openGraph={()=>setGraphTarget("@master")}
+        open={id=>void openMontageCanvas(id)} importCanvas={()=>montageInput.current?.click()}
+        previewError={error=>notify(error instanceof Error ? error.message : String(error))}/>}
       <div
+        style={montageMode ? {display:"none"} : undefined}
+        inert={modal==="settings"}
         className={
-          "theater-workspace " + (!inspectorOpen ? "inspector-closed" : "")
+          "theater-workspace " + (!inspectorOpen ? "inspector-closed " : "")+(modelWorkspace ? "model-workspace" : "")
         }
       >
         {workspaceMode === "preprocess" && (
@@ -2566,7 +3614,10 @@ export default function TheaterApp() {
                     (preprocessingResource?.id === r.id ? "active" : "")
                   }
                   key={r.id}
-                  onClick={() => setPreprocessId(r.id)}
+                  onClick={() => {
+                    if(r.id===preprocessingResource?.id || !allowWorkbenchExit())return;
+                    setPreprocessId(r.id);setSelectedControl("");setPreprocessOriginal(false);
+                  }}
                 >
                   {r.name}
                   <small>
@@ -2587,7 +3638,7 @@ export default function TheaterApp() {
             </button>
             <button
               className="wide-button"
-              onClick={() => setWorkspaceMode("scene")}
+              onClick={returnFromWorkbench}
             >
               返回场景
             </button>
@@ -2598,35 +3649,25 @@ export default function TheaterApp() {
           hidden={workspaceMode === "preprocess"}
         >
           <div className="workspace-panel-heading">
-            <strong>素材与层级</strong>
-            <small>{scene.layers.length} 个图层</small>
+            <strong>{managerTab==="assets" ? "项目浏览器" : "场景对象"}</strong>
+            <small>{managerTab==="assets" ? "PROJECT" : scene.layers.length+" 个图层"}</small>
           </div>
-          <nav className="manager-tabs" aria-label="场景管理">
-            <button
-              className={managerTab === "assets" ? "active" : ""}
-              aria-pressed={managerTab === "assets"}
-              onClick={() => setManagerTab("assets")}
-            >
-              <FolderOpen size={14} />
-              素材
+          <nav className="manager-tabs" aria-label="浏览范围">
+            <button aria-pressed={managerTab==="assets"} onClick={()=>setManagerTab("assets")}>
+              <FolderOpen size={14}/> 项目
             </button>
-            <button
-              className={managerTab === "layers" ? "active" : ""}
-              aria-pressed={managerTab === "layers"}
-              onClick={() => setManagerTab("layers")}
-            >
-              <Layers size={15} />
-              图层
-            </button>
-            <button
-              className={managerTab === "tree" ? "active" : ""}
-              aria-pressed={managerTab === "tree"}
-              onClick={() => setManagerTab("tree")}
-            >
-              <ListTree size={14} />
-              场景树
+            <button aria-pressed={managerTab==="layers"} onClick={()=>setManagerTab("layers")}>
+              <Layers size={15}/> 场景
             </button>
           </nav>
+          {managerTab==="assets" && montagePreview && (
+            <details className="scene-project-canvases">
+              <summary>项目画布 <small>{montagePreview.canvases.length}</small></summary>
+              <ProjectCanvases project={montagePreview} current={montagePreview.activeCanvasId}
+                disabled={!!busy || !!visibleMontageDraft || !!visibleDesign || !!shaderDraft}
+                open={id=>void openMontageCanvas(id)} importCanvas={()=>montageInput.current?.click()} edit={editMontageUI}/>
+            </details>
+          )}
           <nav hidden={managerTab !== "assets"}>
             {[
               ["model", "模型"],
@@ -2676,7 +3717,8 @@ export default function TheaterApp() {
                         </small>
                       </div>
                       <button
-                        title={"预处理 " + m.name}
+                        title={"编辑模型素材 " + m.name}
+                        aria-label={"编辑模型素材 " + m.name}
                         onClick={() => openPreprocess(m.id)}
                       >
                         <SlidersHorizontal size={15} />
@@ -2834,6 +3876,7 @@ export default function TheaterApp() {
               <div
                 className={"media-card " + a.kind}
                 key={a.id}
+                onClick={()=>{if(a.kind==="audio") selectedLibraryAudio.current=a.id;}}
                 draggable
                 onDragStart={(e) =>
                   e.dataTransfer.setData(
@@ -2909,7 +3952,10 @@ export default function TheaterApp() {
             <div className="layer-title">
               <strong>
                 <FolderOpen size={14} />
-                {managerTab === "tree" ? "场景集合" : "图层顺序"}
+                <select aria-label="场景对象视图" value={sceneList} onChange={e=>setSceneList(e.target.value as typeof sceneList)}>
+                  <option value="layers">图层顺序</option>
+                  <option value="tree">场景树</option>
+                </select>
               </strong>
               <button
                 className={scene.depthOcclusion !== false ? "active" : ""}
@@ -2953,6 +3999,7 @@ export default function TheaterApp() {
                       </button>
                     ),
                   )}
+                  <button onClick={() => addLayer("color",true)}><Square size={14}/> 几何图形</button>
                   <div className="menu-divider" />
                   {(["point", "area", "sun", "ambient"] as const).map(
                     (type) => (
@@ -2982,7 +4029,17 @@ export default function TheaterApp() {
                 <Camera size={15} />
                 成片相机
               </button>
-              {layerRows.map(({ l, depth }) => (
+              <button className="layer-camera" onClick={()=>setGraphTarget("output")}>
+                <Code2 size={15}/> 画布输出效果
+              </button>
+              {layerRows.map(({ l, depth }) => visibleDesign ? (
+                <div key={l.id} className={"layer-row "+(selectedIds.includes(l.id) ? "selected" : "")+
+                    (scene.layers.find(layer=>layer.id===l.id)!==l?" agent-outline":"")}
+                  style={{paddingLeft:9+depth*14}}>
+                  <button className="layer-label" onClick={()=>selectLayer(l.id)}>{icons[l.kind]} {l.name}</button>
+                  {l.light && <small>{l.light.type}</small>}
+                </div>
+              ) : (
                 <React.Fragment key={l.id}>
                 <div
                   className={
@@ -3025,7 +4082,7 @@ export default function TheaterApp() {
                     setContextMenu({ x: e.clientX, y: e.clientY, ids });
                   }}
                 >
-                  {(l.kind === "group" || (managerTab === "tree" && sceneActions.has(l.id))) && (
+                  {(l.kind === "group" || (sceneList === "tree" && sceneActions.has(l.id))) && (
                     <button
                       className="layer-fold"
                       title={foldedGroups[l.id] ? "展开子项" : "折叠子项"}
@@ -3108,7 +4165,7 @@ export default function TheaterApp() {
                     {l.locked ? <Lock size={11} /> : <Unlock size={11} />}
                   </button>
                 </div>
-                {managerTab === "tree" && !foldedGroups[l.id] && sceneActions.get(l.id)?.map((clip) => (
+                {sceneList === "tree" && !foldedGroups[l.id] && sceneActions.get(l.id)?.map((clip) => (
                   <button
                     key={clip.id}
                     className={"outliner-clip" + (selection.includes(clip.id) ? " active" : "")}
@@ -3186,103 +4243,24 @@ export default function TheaterApp() {
         >
           <div className="scene-view-toolbar">
             <div>
-              {workspaceMode === "scene" && (
+              {workspaceMode==="scene" ? (
                 <div className="viewport-switch" aria-label="画布视图">
-                  <button
-                    className={!spatialView ? "active" : ""}
-                    aria-pressed={!spatialView}
-                    onClick={() => toggleSpatial(false)}
-                  >
-                    成片
-                  </button>
-                  <button
-                    className={spatialView ? "active" : ""}
-                    aria-pressed={spatialView}
-                    onClick={() => toggleSpatial(true)}
-                    title="切换视图（V）"
-                  >
-                    <Box size={14} />
-                    三维预览
+                  <button aria-pressed={!spatialView} onClick={()=>toggleSpatial(false)}>相机视图</button>
+                  <button aria-pressed={spatialView} onClick={()=>toggleSpatial(true)} title="切换视图（V）">
+                    <Box size={14}/> 三维视图
                   </button>
                 </div>
-              )}
-              <button
-                className={workspaceMode === "preprocess" ? "active" : ""}
-                onClick={() =>
-                  workspaceMode === "preprocess"
-                    ? setWorkspaceMode("scene")
-                    : openPreprocess()
-                }
-              >
-                模型预处理
-              </button>
-              {workspaceMode === "preprocess" && (
-                <button onClick={() => setWorkspaceMode("scene")}>
-                  返回场景
-                </button>
-              )}
-              <button
-                className={
-                  workspaceMode === "scene" &&
-                  inspectorOpen &&
-                  inspector === "layer"
-                    ? "active"
-                    : ""
-                }
-                onClick={() => {
-                  setWorkspaceMode("scene");
-                  setInspector("layer");
-                  setInspectorOpen((v) => !v || inspector !== "layer");
-                }}
-              >
-                图层
-              </button>
-              <button
-                className={
-                  workspaceMode === "scene" &&
-                  inspectorOpen &&
-                  inspector === "controller"
-                    ? "active"
-                    : ""
-                }
-                onClick={() => {
-                  setWorkspaceMode("scene");
-                  setInspector("controller");
-                  setInspectorOpen((v) => !v || inspector !== "controller");
-                }}
-              >
-                模型控制器
-              </button>
-              <button
-                className={
-                  workspaceMode === "scene" &&
-                  inspectorOpen &&
-                  inspector === "camera"
-                    ? "active"
-                    : ""
-                }
-                onClick={() => {
-                  setWorkspaceMode("scene");
-                  selectLayer("@camera");
-                  setChannel("focusZ");
-                  setInspector("camera");
-                  setInspectorOpen((v) => !v || inspector !== "camera");
-                }}
-              >
-                <Camera size={15} />
-                相机
-              </button>
+              ) : <strong className="studio-preview-label">{textureWorkspace ? "贴图编辑" : motionWorkspace ? "动作预览" : "模型素材预览"}</strong>}
             </div>
             <div>
-              <select
-                aria-label="预览质量"
-                value={quality}
-                onChange={(e) => setQuality(+e.target.value)}
-              >
-                <option value="720">流畅</option>
-                <option value="960">均衡</option>
-                <option value="1440">高清</option>
-              </select>
+              {workspaceMode==="scene" && !!instanceControls.length && <button aria-pressed={sceneControls}
+                onClick={()=>setSceneControls(value=>!value)} title="拖动已绑定的模型控制点以记录关键帧">
+                模型控制点
+              </button>}
+              {!inspectorOpen && <button onClick={()=>setInspectorOpen(true)} title="显示检查器">
+                <SlidersHorizontal size={15}/> 检查器
+              </button>}
+              {!textureWorkspace && <>
               <div className="viewport-zoom" aria-label="预览缩放">
                 <button title="缩小画布" onClick={() => zoomViewport("main", 120)}>
                   <Minus size={15} />
@@ -3320,13 +4298,14 @@ export default function TheaterApp() {
                 title="原尺寸透明截图"
                 onClick={async () => {
                   if (!ready) return;
-                  rRef.current!.renderAt(sRef.current, tRef.current, true);
-                  download(await rRef.current!.png(), scene.name + ".png");
+                  rRef.current!.renderAt(displayRef.current, modelWorkspace ? 0 : tRef.current, true);
+                  download(await rRef.current!.png(), (modelWorkspace ? preprocessingResource?.name??scene.name : scene.name) + ".png");
                   rRef.current!.invalidate();
                 }}
               >
                 <Download size={16} />
               </button>
+              </>}
             </div>
           </div>
           {workspaceMode === "scene" && (
@@ -3454,8 +4433,9 @@ export default function TheaterApp() {
             </div>
           )}
           <div
+            ref={agentViewport}
             className={
-              "viewport-panes " +
+              "viewport-panes " + (modelWorkspace ? "workbench-viewports " : "") +
               (workspaceMode === "scene" ? splitLayout : "single")
             }
           >
@@ -3469,7 +4449,7 @@ export default function TheaterApp() {
             >
               <div
                 className={
-                  "scene-canvas" +
+                  "scene-canvas" + (visibleDesign || rRef.current?.shaderPreview ? " agent-outline" : "") +
                   (spatialView && workspaceMode === "scene"
                     ? " is-spatial"
                     : "")
@@ -3486,6 +4466,15 @@ export default function TheaterApp() {
                     orient={orientViewport}
                   />
                 )}
+                {poseActorId && <ModelPoseControls store={poseStore}
+                  controls={modelWorkspace ? workbenchControls : instanceControls}
+                  params={modelWorkspace ? previewModelParams : params}
+                  selected={selectedControl}
+                  input={motionWorkspace ? ()=>motionPose.current : modelWorkspace ? undefined : instancePose}
+                  place={modelWorkspace && workbenchTab==="rig" && !visibleDesign ? (id,x,y)=>{
+                    setSelectedControl(id);
+                    saveModelControls(workbenchControls.map(c=>c.id===id ? {...c,x,y} : c));
+                  } : undefined}/>}
                 {viewBox?.pane === "main" && (
                   <div
                     className="viewport-marquee"
@@ -3505,6 +4494,8 @@ export default function TheaterApp() {
                 )}
               </div>
             </div>
+            {modelWorkspace && <div className="model-board-host" ref={setTextureBoard} hidden={!textureWorkspace}/>}
+            <AgentCursor activity={agentActivity} viewport={agentViewport}/>
             {workspaceMode === "scene" && splitLayout !== "single" && (
               <>
                 <div
@@ -3557,7 +4548,7 @@ export default function TheaterApp() {
                   </div>
                   <div
                     className={
-                      "scene-canvas mirror-canvas" +
+                      "scene-canvas mirror-canvas" + (visibleDesign || rRef.current?.shaderPreview ? " agent-outline" : "") +
                       (mirrorSpatial ? " is-spatial" : "")
                     }
                     ref={mirrorHost}
@@ -3605,8 +4596,9 @@ export default function TheaterApp() {
           </div>
           <div className="scene-canvas-hint">
             <span>
-              {workspaceMode === "preprocess"
-                ? "模型素材预览 · 原始姿态 · 不含场景光与实例后处理"
+              {motionWorkspace ? "动作预览 · 拖动模型控制点可记录参数关键帧"
+                : textureWorkspace ? "贴图编辑 · 保存后生成独立贴图副本"
+                : modelWorkspace ? "模型素材预览 · 使用独立姿势与素材效果"
                 : spatialView
                   ? "中键环绕 · 左拖移动 · Shift＋左拖框选 · 右键菜单"
                   : "左拖移动 · 滚轮缩放 · Shift＋左拖框选 · 右键菜单"}
@@ -3654,19 +4646,7 @@ export default function TheaterApp() {
         </main>
         <aside className="theater-inspector" hidden={!inspectorOpen}>
           <div className="inspector-header">
-            <strong>
-              {workspaceMode === "preprocess"
-                ? "模型预处理 · 素材级"
-                : inspector === "controller"
-                  ? "独立模型控制器"
-                  : inspector === "audio"
-                    ? "音频编辑器"
-                    : inspector === "camera"
-                      ? "透视相机与景深"
-                      : inspector === "effects"
-                        ? "后处理层"
-                        : "图层属性"}
-            </strong>
+            <strong>{workspaceMode==="preprocess" ? "模型素材编辑" : "检查器"}</strong>
             <button
               aria-label="关闭属性面板"
               onClick={() => setInspectorOpen(false)}
@@ -3691,12 +4671,33 @@ export default function TheaterApp() {
               {workspaceMode === "scene" && selectedClip && <small>{selectedClip.name}</small>}
             </div>
           </div>
-          <div className="scene-properties">
+          <div className={"scene-properties"+(visibleDesign?" agent-outline":"")} title={visibleDesign?"确认草稿后即可编辑":undefined} inert={!!visibleDesign} onFocusCapture={e=>{
+            const el=e.target;
+            if (!(el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)) return;
+            const label=el.getAttribute("aria-label") || el.closest("label")?.querySelector("span")?.textContent ||
+              el.closest("label")?.childNodes[0]?.textContent?.trim();
+            if (!label) return;
+            const binding=propertiesOf(inspection,selected,params).find(b=>b.name===label || b.channel==="param:"+label);
+            focusedControl.current={layerId:selected,binding,label,value:el instanceof HTMLInputElement && el.type==="checkbox" ? el.checked : el.value};
+          }}>
             {workspaceMode === "preprocess" ? (
-              <ModelPreprocessPanel
+              preprocessingResource ? <ModelWorkbench key={preprocessingResource.id}
+                resource={preprocessingResource} assets={inspection.assets} readOnly={!!visibleDesign}
+                params={previewModelParams} tab={workbenchTab} selectTab={setWorkbenchTab}
+                board={textureBoard} dock={motionDock} dockHeight={setModelDockHeight}
+                controls={workbenchControls} selectedControl={selectedControl} selectControl={setSelectedControl}
+                saveControls={saveModelControls} attachPose={attachMotionPose}
+                textureDirty={setTextureDirty} motionDirty={setMotionDirty}
+                rename={name=>change(s=>{s.models.find(m=>m.id===preprocessingResource.id)!.name=checkedModelName(name);})}
+                texture={(index,asset)=>change(s=>applyTextureCopy(s,preprocessingResource.id,index,asset))}
+                motion={asset=>change(s=>storePresetMotion(s,preprocessingResource.id,asset))}
+                pose={poseWorkbench}
+                preprocess={<ModelPreprocessPanel
                 resource={preprocessingResource}
+                onOpenGraph={()=>setGraphTarget("@preprocess:"+preprocessingResource.id)}
                 original={preprocessOriginal}
                 onCompare={setPreprocessOriginal}
+                onGraphPreview={previewEffectGraph}
                 instances={scene.layers
                   .filter((l) => l.model && l.model.resourceId === preprocessingResource?.id)
                   .map((l) => l.name)}
@@ -3708,7 +4709,8 @@ export default function TheaterApp() {
                     if (r) r.preprocess = value;
                   })
                 }
-              />
+              />}/>
+                : <p className="empty-state">先导入或选择模型。</p>
             ) : inspector === "camera" ? (
               <>
                 <p className="property-note">
@@ -3839,18 +4841,18 @@ export default function TheaterApp() {
                       音频
                     </button>
                   )}
-                  {!selectedLayer.light && (
+                  {!["light","audio"].includes(selectedLayer.kind) && (
                     <button
                       className={inspector === "effects" ? "active" : ""}
                       onClick={() => setInspector("effects")}
                     >
-                      场景后处理
+                      图层效果
                     </button>
                   )}
                 </div>
                 {inspector === "layer" && (
                   <>
-                    {selectedLayer.light && (
+                    {selectedLayer.light && (<>
                       <LightPanel
                         scene={scene}
                         layer={animated!}
@@ -3871,7 +4873,13 @@ export default function TheaterApp() {
                           )
                         }
                       />
-                    )}
+                      <AppearancePresetControls key={selectedLayer.id} kind="light" data={lightAppearance(selectedLayer)}
+                        apply={preset=>updateLayer(l=>{
+                          l.light={...preset.light,targets:l.light!.targets};
+                          l.transform=preset.transform;
+                          setAppearanceCurves(l,"light",preset.curves);
+                        })}/>
+                    </>)}
                     <label className="stack-field">
                       所属图层组
                       <select
@@ -4037,23 +5045,38 @@ export default function TheaterApp() {
                         <option value="screen">滤色</option>
                       </select>
                     </label>
-                    {selectedLayer.kind === "color" && (
+                    {selectedLayer.kind === "color" && (!selectedLayer.shape || /^(rect|ellipse|star)$/.test(selectedLayer.shape.kind)) && (
                       <label className="color-field">
-                        颜色
-                        <input
-                          type="color"
-                          value={selectedLayer.color}
-                          onChange={(e) =>
-                            updateLayer((l) => {
-                              l.color = e.target.value;
-                            })
-                          }
-                        />
+                        {selectedLayer.shape ? "图形填色" : "颜色"}
+                        <input type="color" value={selectedLayer.shape?.fill.match(/^#[0-9a-f]{6}$/i)?.[0] ??
+                          (selectedLayer.shape ? defaultShape.fill : selectedLayer.color)}
+                          onChange={(e)=>updateLayer(l=>{
+                            if(l.shape) l.shape.fill=e.target.value;
+                            else l.color=e.target.value;
+                          })}/>
                       </label>
                     )}
+                    {selectedLayer.shape && <>
+                      <h3>几何图形</h3>
+                      <label className="stack-field">形状
+                        <select aria-label="几何形状" value={selectedLayer.shape.kind} onChange={e=>{
+                          const kind=e.target.value;
+                          if (kind==="svg" || kind==="expression") {setJsonEdit("shape");return;}
+                          updateLayer(l=>{l.shape=validateShape({...defaultShape,kind,fill:l.shape?.fill==="none" ? defaultShape.fill : l.shape?.fill});});
+                        }}>
+                          <option value="rect">矩形</option><option value="ellipse">椭圆</option><option value="star">星形</option>
+                          <option value="svg">SVG 源码</option><option value="expression">表达式路径</option>
+                        </select>
+                      </label>
+                      <div className="shader-actions">
+                        <button onClick={()=>setJsonEdit("shape")}>编辑图形 JSON</button>
+                        <button onClick={()=>download(new Blob([shapeSvg(selectedLayer.shape!,selectedLayer.width,selectedLayer.height)],{type:"image/svg+xml"}),selectedLayer.name+".svg")}>导出 SVG</button>
+                      </div>
+                    </>}
                     {selectedLayer.text && (
                       <>
                         <h3>文本浮层</h3>
+                        <button onClick={()=>setJsonEdit("text")}>编辑文本动画 JSON</button>
                         <textarea
                           aria-label="文本内容"
                           rows={4}
@@ -4140,14 +5163,24 @@ export default function TheaterApp() {
                             <option value="right">右对齐</option>
                           </select>
                         </label>
+                        <EffectGraphControls key={selectedLayer.id + ":text"} kind="text"
+                          graph={selectedLayer.text.graph}
+                          onChange={graph=>updateLayer(l=>{l.text!.graph=graph;})}
+                          {...graphParameterControls(selectedLayer,"text")}/>
+                        <AppearancePresetControls key={selectedLayer.id+":text-settings"} kind="text" data={textAppearance(selectedLayer)}
+                          apply={preset=>updateLayer(l=>{
+                            l.text={value:l.text!.value,...preset.style};
+                            setAppearanceCurves(l,"text",preset.curves);
+                          })}/>
                         <label className="stack-field">
-                          文本动画
+                          旧版文本动画
                           <select
                             aria-label="文本动画"
                             value={selectedLayer.text.animation}
                             onChange={(e) =>
                               updateLayer((l) => {
                                 l.text!.animation = e.target.value as TextAnimation;
+                                l.text!.graph = undefined;
                               })
                             }
                           >
@@ -4229,14 +5262,9 @@ export default function TheaterApp() {
                       />
                       模型物理
                     </label>
-                    <label className="toggle-line">
-                      <input
-                        type="checkbox"
-                        checked={autoKey}
-                        onChange={(e) => setAutoKey(e.target.checked)}
-                      />
-                      自动记录参数关键帧
-                    </label>
+                    <button className="wide-button" onClick={()=>openPreprocess(selectedLayer.model!.resourceId)}>
+                      <Layers size={15}/> 编辑源模型素材
+                    </button>
                     <div className="search-field">
                       <Search size={13} />
                       <input
@@ -4253,6 +5281,10 @@ export default function TheaterApp() {
                       <div className="scene-param" key={p.id}>
                         <div>
                           <span title={p.id}>{p.name}</span>
+                          <button title={"在曲线中显示 "+p.id} aria-label={"在曲线中显示 "+p.id}
+                            onClick={()=>openCurves({layerId:selectedLayer.id,channel:"param:"+p.id})}>
+                            <Activity size={13}/>
+                          </button>
                           <button
                             title={"记录 " + p.id}
                             onClick={() =>
@@ -4298,18 +5330,6 @@ export default function TheaterApp() {
                         下一页
                       </button>
                     </div>
-                    <button
-                      className="wide-button"
-                      onClick={() => {
-                        openCurves(
-                          currentBinding.channel.startsWith("param:")
-                            ? currentBinding
-                            : undefined,
-                        );
-                      }}
-                    >
-                      打开模型参数曲线
-                    </button>
                     <details>
                       <summary>高级：口型参数与分组</summary>
                       {(
@@ -4368,16 +5388,10 @@ export default function TheaterApp() {
                     <p className="property-note">
                       此处是当前场景实例的后处理，独立于模型素材预处理。
                     </p>
-                    {selectedLayer.model && (
-                      <button
-                        className="wide-button"
-                        onClick={() =>
-                          openPreprocess(selectedLayer.model!.resourceId)
-                        }
-                      >
-                        打开模型素材预处理
-                      </button>
-                    )}
+                    <button className="wide-button" disabled={selectedLayer.locked}
+                      onClick={()=>setGraphTarget(selectedLayer.id)}>
+                      <Code2 size={15}/> 编辑此图层的效果节点
+                    </button>
                     {["model", "image", "text", "color", "group"].includes(
                       selectedLayer.kind,
                     ) && (
@@ -4438,12 +5452,25 @@ export default function TheaterApp() {
                     <ShaderControls
                       key={selectedLayer.id}
                       effects={selectedLayer.effects}
-                      onRecipe={recipe => updateLayer(l => { l.effects.stylize = recipe; })}
+                      onRecipe={recipe => updateLayer(l => { l.effects.stylize = recipe; l.effects.graph = undefined; })}
                       amount={animated!.effects.stylizeMix ?? 1}
                       onAmount={v => setValue("effects.stylizeMix", v)}
                       onKey={() => setValue("effects.stylizeMix", animated!.effects.stylizeMix ?? 1, true)}
                       keyed={!!selectedLayer.animation["effects.stylizeMix"]?.length}
                     />
+                    <EffectGraphControls key={selectedLayer.id + ":post"} kind="post"
+                      graph={selectedLayer.effects.graph} legacy={selectedLayer.effects.stylize}
+                      onChange={graph=>updateLayer(l=>{l.effects.graph=graph;})}
+                      {...graphParameterControls(selectedLayer,"post")}/>
+                    <AppearancePresetControls key={selectedLayer.id+":post-settings"} kind="post"
+                      data={{effects:selectedLayer.effects,surface:selectedLayer.surface,
+                        receiveLight:selectedLayer.receiveLight,curves:appearanceCurves(selectedLayer,"post")}}
+                      apply={preset=>updateLayer(l=>{
+                        l.effects=preset.effects;
+                        l.surface=preset.surface;
+                        l.receiveLight=preset.receiveLight;
+                        setAppearanceCurves(l,"post",preset.curves);
+                      })}/>
                     <label className="stack-field">
                       模糊算法
                       <select
@@ -4873,39 +5900,24 @@ export default function TheaterApp() {
                 )}
               </>
             )}
-            <div
-              className="inspector-bottom"
-              style={{
-                display: workspaceMode === "preprocess" ? "none" : undefined,
-              }}
-            >
-              <label>
-                <input
-                  type="checkbox"
-                  checked={autoKey}
-                  onChange={(e) => setAutoKey(e.target.checked)}
-                />
-                自动关键帧
-              </label>
-              <button onClick={() => setCurveOpen((v) => !v)}>
-                <Diamond size={13} />
-                曲线
-              </button>
-              <button onClick={() => setModal("help")}>帮助</button>
-            </div>
           </div>
         </aside>
       </div>
       <div
         className="timeline-slot"
+        inert={modal==="settings"}
+        hidden={montageMode}
         style={{
-          visibility: workspaceMode === "preprocess" ? "hidden" : "visible",
+          display: montageMode ? "none" : undefined,
+          visibility: modelWorkspace && !motionWorkspace ? "hidden" : "visible",
         }}
       >
-        <div className="timeline-original" hidden={curveOpen}>
+        {modelWorkspace && <div ref={setMotionDock} className="model-dock-host" hidden={!motionWorkspace}/>}
+        <div className={"timeline-original"+(visibleDesign?" agent-outline":"")} title={visibleDesign?"确认草稿后即可编辑":undefined}
+          hidden={curveOpen || modelWorkspace} inert={!!visibleDesign}>
           <SceneTimeline
-            visible={!curveOpen && workspaceMode === "scene"}
-            scene={scene}
+            visible={!montageMode && !curveOpen && workspaceMode === "scene"}
+            scene={visibleDesign ?? scene}
             selectedLayerId={selected}
             selectedBinding={currentBinding}
             paramsByLayer={paramsByLayer}
@@ -4936,12 +5948,13 @@ export default function TheaterApp() {
             onDuplicate={duplicateClips}
             onDelete={deleteClips}
             onMarker={marker}
-            onCurve={(binding) => openCurves(binding)}
-            curveOpen={curveOpen}
+            onCurve={openCurves}
+            autoKey={autoKey}
+            onToggleAutoKey={()=>setAutoKey(value=>!value)}
           />
         </div>
         {curveOpen && workspaceMode === "scene" && (
-          <div className="curve-area">
+          <div className="curve-area" inert={!!visibleDesign}>
             <div
               className="curve-resize"
               title="调整曲线区高度"
@@ -4963,10 +5976,11 @@ export default function TheaterApp() {
               }}
             />
             <CurveWorkspace
-              scene={scene}
+              scene={visibleDesign ?? scene}
               binding={currentBinding}
               paramsByLayer={paramsByLayer}
               seed={curveSeed}
+              agentSelection={curveSelection}
               time={time}
               snap={snap}
               autoKey={autoKey}
@@ -4994,7 +6008,7 @@ export default function TheaterApp() {
           {busy ||
             `${scene.layers.length} 个图层 · ${scene.layers.filter((l) => l.model).length} 个独立模型容器`}
         </span>
-        <span>{dirty ? "草稿自动保存" : "工程就绪"} · 本地离线 · .livemg</span>
+        <span>{dirty ? "工程有改动" : "工程就绪"} · 本地离线 · {montageCommitted ? ".livemgs" : ".livemg"}</span>
       </footer>
       {contextMenu && (
         <div
@@ -5189,7 +6203,7 @@ export default function TheaterApp() {
       />
       <input
         type="file"
-        accept=".livemg,.l2dstudio"
+        accept=".livemgs,.livemg,.l2dstudio"
         ref={projectInput}
         hidden
         onChange={(e) => {
@@ -5197,6 +6211,54 @@ export default function TheaterApp() {
           e.target.value = "";
         }}
       />
+      <input type="file" accept=".livemg,.l2dstudio" aria-label="导入画布工程" ref={montageInput} hidden onChange={e=>{
+        const file=e.target.files?.[0];e.target.value="";
+        if(file) void importMontageCanvas(file);
+      }}/>
+      {editorGraph && graphTarget && createPortal(<React.Suspense fallback={null}>
+        <ShaderGraphEditor key={(graphLocation?.canvasId??"")+":"+graphTarget} graph={editorGraph}
+          preview={graphTarget==="@master" || foreignGraph || montageMode ? undefined : previewEffectGraph}
+          scopeLabel={graphScope} targets={nodeTargets} target={graphTarget}
+          selectTarget={id=>setGraphTarget(id,graphLocation?.canvasId)}
+          readOnly={!!(editorDraft || designDraft || visibleMontageDraft || shaderDraft) || !nodeTarget?.available}
+          readOnlyReason={!nodeTarget?.available ? "此图层已锁定" : undefined}
+          close={()=>setGraphTarget(undefined)} change={graph=>writeScopedGraph(graphTarget,graph)}/>
+      </React.Suspense>,document.body)}
+      {jsonEdit && selectedLayer && !visibleDesign && <SceneJsonEditor kind={jsonEdit} key={selectedLayer.id+jsonEdit}
+        value={jsonEdit==="shape" ? selectedLayer.shape : textAnimationFile(selectedLayer)} close={()=>setJsonEdit(undefined)}
+        apply={value=>{
+          if (jsonEdit==="shape") {
+            const shape=validateShape(value); updateLayer(l=>{l.shape=shape;});
+          } else {
+            const candidate=structuredClone(selectedLayer);
+            applyTextAnimation(candidate,value);
+            updateLayer(l=>{l.text=candidate.text;l.animation=candidate.animation;});
+          }
+        }}/>}
+      <AgentPanel documentId={() => shaderDocument.current} activeDocument={shaderDocument.current} runTool={runAgentTool}
+        onTurnActive={active=>agentActivity.turn(active,active ? {layerId:selected,label:"正在思考"} : undefined)}
+        settingsHost={settingsHost} onSettings={()=>showSettings("agent")} closeSettings={()=>setModal("")}
+        mcp={<McpControls agent={shaderAgent} openGraph={setGraphTarget}/>}
+        context={montageMode ? {
+            label:"总时间线"+(agentMontageSource ? " / "+agentMontageSource.scene.name+" · 片段" : ""),
+            instructions:"当前编辑范围为总时间线。总成片效果请使用 montage_edit。"+
+              (agentMontageClip ? "选中片段 clipId="+agentMontageClip.id+"，源画布 canvasId="+agentMontageClip.canvasId+"。" : ""),
+          }
+          : workspaceMode==="preprocess" && preprocessingResource ? {
+            label:scene.name+" / "+preprocessingResource.name+" / 模型素材",
+            instructions:"当前模型素材 resourceId="+preprocessingResource.id+
+              (montageCommitted ? "，canvasId="+montageCommitted.activeCanvasId : "")+"。素材效果请使用 preprocess 范围。",
+          } : {
+            label:scene.name+(selectedLayer ? " / "+selectedLayer.name : selected==="@camera" ? " / 成片相机" : ""),
+            instructions:"当前画布"+(montageCommitted ? " canvasId="+montageCommitted.activeCanvasId : "")+
+              (selected ? "；选中对象 ID="+selected : "")+(selectedClip ? "；选中片段 clipId="+selectedClip.id : "")+
+              (selectedLayer && shaderTargets(inspection).some(t=>t.id===selectedLayer.id && t.available)
+                ? "。如果请求指的是选中对象的效果，使用该对象 ID 作为明确的后处理目标。" : "。"),
+          }}
+        draft={editorAgentDraft} draftScope={draftScope}
+        openGraph={target=>setGraphTarget(target,visibleMontageDraft?.targetCanvasId)}
+        apply={montageDraft ? commitMontageDraft : designDraft ? applyDesignDraft : applyLocalGraphDraft}
+        discard={montageDraft ? ()=>discardMontageDraft() : designDraft ? clearDesignDraft : () => clearShaderPreview()}/>
       {toast && <div className="toast">{toast}</div>}
       {busy && modal !== "export" && (
         <div className="busy-strip">
@@ -5204,7 +6266,16 @@ export default function TheaterApp() {
           {busy}
         </div>
       )}
-      {modal && (
+      {modal==="settings" && (
+        <div className="modal-backdrop studio-settings-backdrop" role="dialog" aria-modal="true" aria-label="FrameStudio 设置">
+          <StudioSettings page={settingsTab} select={setSettingsTab} prefs={preferences} change={updatePreferences}
+            close={()=>setModal("")} help={()=>setModal("help")} agent={<>
+              <McpControls agent={shaderAgent} openGraph={id=>{setModal("");setGraphTarget(id);}}/>
+              <div ref={setSettingsHost}/>
+            </>}/>
+        </div>
+      )}
+      {modal && modal!=="settings" && (
         <div className="modal-backdrop">
           <div
             className={`modal ${modal}-modal`}
@@ -5304,10 +6375,16 @@ export default function TheaterApp() {
             {modal === "export" && (
               <>
                 <h1>导出成片</h1>
+                {(visibleDesign || visibleMontageDraft) && <p className="hint">请先应用或丢弃 Agent 草稿，再导出成片。</p>}
+                {montageCommitted && <div className="export-range" aria-label="导出对象">
+                  <button disabled={!!busy} aria-pressed={exportScope==="canvas"} onClick={()=>{setExportScope("canvas");setExportResult(null);setExportStatus("");}}>当前画布</button>
+                  <button disabled={!!busy} aria-pressed={exportScope==="montage"} onClick={()=>{setExportScope("montage");setExportResult(null);setExportStatus("");}}>完整总时间线</button>
+                </div>}
                 <div className="export-summary" aria-label="成片规格">
-                  <span><small>分辨率</small><strong>{scene.width} × {scene.height}</strong></span>
-                  <span><small>帧率</small><strong>{scene.fps} fps</strong></span>
-                  <span><small>时长</small><strong>{(onlyWork ? scene.workArea.end - scene.workArea.start : scene.duration).toFixed(2)} s</strong></span>
+                  <span><small>分辨率</small><strong>{(exportScope==="montage" ? montageCommitted??scene : scene).width} × {(exportScope==="montage" ? montageCommitted??scene : scene).height}</strong></span>
+                  <span><small>帧率</small><strong>{(exportScope==="montage" ? montageCommitted??scene : scene).fps} fps</strong></span>
+                  <span><small>时长</small><strong>{(exportScope==="montage" && montageCommitted ? montageEnd(montageCommitted) :
+                    onlyWork ? scene.workArea.end-scene.workArea.start : scene.duration).toFixed(2)} s</strong></span>
                 </div>
                 <div className="export-options">
                   {[
@@ -5352,7 +6429,7 @@ export default function TheaterApp() {
                     </small>
                   </label>
                 )}
-                <div className="export-range" aria-label="导出范围">
+                <div className="export-range" aria-label="导出范围" style={exportScope==="montage"?{display:"none"}:undefined}>
                   <button disabled={!!busy} aria-pressed={!onlyWork} onClick={() => setOnlyWork(false)}>整段</button>
                   <button disabled={!!busy} aria-pressed={onlyWork} onClick={() => setOnlyWork(true)}>
                     工作区 {scene.workArea.start.toFixed(2)}–{scene.workArea.end.toFixed(2)} s
@@ -5372,7 +6449,7 @@ export default function TheaterApp() {
                       className="wide-button primary"
                       onClick={() => {
                         const name =
-                          scene.name +
+                          (exportScope==="montage" ? montageCommitted?.name??scene.name : scene.name) +
                           ({
                             mp4: ".mp4",
                             hevc: ".mp4",

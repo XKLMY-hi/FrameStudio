@@ -11,6 +11,10 @@ import {
 
 // The owner is part of every edit operation; selection is never used to infer it.
 export type Binding = { layerId: string; channel: string; clipId?: string };
+export function effectParameter(layer: Layer | undefined, channel: string) {
+  if (channel.startsWith("postGraph.")) return layer?.effects.graph?.parameters?.[channel.slice(10)];
+  if (channel.startsWith("textGraph.")) return layer?.text?.graph?.parameters?.[channel.slice(10)];
+}
 export function parameterDriven(s: Scene, b: Binding, t: number) {
   if (!b.channel.startsWith("param:")) return false;
   const l = s.layers.find((l) => l.id === b.layerId);
@@ -112,7 +116,7 @@ export function readProperty(s: Scene, b: Binding, t: number) {
       base = l.model?.baseValues[b.channel.slice(6)] ?? 0;
     } else {
       keys = l.animation[b.channel] || [];
-      base = b.channel.startsWith("effects.")
+      base = effectParameter(l,b.channel)?.value ?? (b.channel.startsWith("effects.")
         ? ((l.effects as any)[b.channel.slice(8)] ??
           (b.channel === "effects.bokeh" ? 0.25 : b.channel === "effects.stylizeMix" ? 1 : 0))
         : b.channel.startsWith("light.")
@@ -123,7 +127,7 @@ export function readProperty(s: Scene, b: Binding, t: number) {
                 b.channel.slice(8)
               ] ??
               0)
-            : ((l.transform as any)[b.channel] ?? 1);
+            : ((l.transform as any)[b.channel] ?? 1));
     }
   }
   return {
@@ -249,8 +253,12 @@ export function propertiesOf(
         );
       }
   }
-  if (l.effects.stylize)
+  if (l.effects.stylize || l.effects.graph)
     add("effects.stylizeMix", "风格强度", "效果", l.effects.stylizeMix ?? 1, 0, 1);
+  for (const [id,param] of Object.entries(l.effects.graph?.parameters ?? {}))
+    add("postGraph."+id,param.label,"效果",param.value,param.min,param.max);
+  for (const [id,param] of Object.entries(l.text?.graph?.parameters ?? {}))
+    add("textGraph."+id,param.label,"文本",param.value,param.min,param.max);
   if (l.light)
     for (const [id, name, min, max] of [
       ["intensity", "强度", 0, 8],

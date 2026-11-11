@@ -1,4 +1,4 @@
-import { Asset, Curve, Key, Param, Project, defaultEffects } from "../types";
+import { Asset, Curve, Key, Param, Project, defaultEffects, uid } from "../types";
 import { clamp, cuesToCurves, evaluate, sampleCurve } from "../engine";
 import {
   Camera,
@@ -12,6 +12,29 @@ import { current, isDraft } from "immer";
 import { titleCharacters } from "./text-motion";
 export function cloneData<T>(value: T): T {
   return structuredClone(isDraft(value) ? current(value as any) : value);
+}
+export function splitSceneClip(clip: SceneClip, time: number): SceneClip | undefined {
+  const cut = time - clip.start;
+  if (cut <= 0 || cut >= clip.duration) return;
+  const right = {
+    ...cloneData(clip),
+    id: uid(),
+    start: time,
+    duration: clip.duration - cut,
+    trimIn: clip.trimIn + cut * clip.speed,
+    fadeIn: 0,
+  };
+  if (clip.kind === "audio" && clip.gainKeys.length) {
+    const value = sampleKeys(clip.gainKeys,cut,1);
+    right.gainKeys = [
+      {t:0,v:value,mode:"linear"},
+      ...right.gainKeys.filter(k=>k.t>cut).map(k=>({...k,t:k.t-cut})),
+    ];
+    clip.gainKeys = [...clip.gainKeys.filter(k=>k.t<cut),{t:cut,v:value,mode:"linear"}];
+  }
+  clip.duration = cut;
+  clip.fadeOut = 0;
+  return right;
 }
 export function sampleKeys(keys: Key[] | undefined, t: number, base: number) {
   return keys?.length
@@ -29,6 +52,10 @@ export function enabledTracks(s: Scene) {
       t.solo && !t.muted && !lightOnly(t) && t.clips.some((c) => c.enabled),
   );
   return s.tracks.filter((t) => !t.muted && (!solo || t.solo || lightOnly(t)));
+}
+export function previewFrameTime(duration:number,fps:number,time:number) {
+  if(time<duration) return Math.max(0,time);
+  return Math.max(0,Math.ceil(duration*fps-1e-9)-1)/fps;
 }
 export function active(c: SceneClip, t: number) {
   return c.enabled && t >= c.start && t < c.start + c.duration;
@@ -107,7 +134,10 @@ export function animatedLayer(s: Scene, l: Layer, t: number): Layer {
       },
     };
   for (const [id, k] of Object.entries(l.animation)) {
-    if (id.startsWith("effects."))
+    if (id.startsWith("postGraph.")) {
+      const key = id.slice(10), param = l.effects.graph?.parameters?.[key];
+      if (param) (v.effects.graphValues ??= {})[key] = sampleKeys(k,local,param.value);
+    } else if (id.startsWith("effects."))
       (v.effects as any)[id.slice(8)] = sampleKeys(
         k,
         local,
@@ -288,7 +318,7 @@ export function spatialLayer(
 }
 export function textAt(s: Scene, l: Layer, t: number) {
   if (!l.text) return "";
-  const typewriter = l.text.animation?.includes("typewriter");
+  const typewriter = !l.text.graph && l.text.animation?.includes("typewriter");
   if (!typewriter && !l.animation.reveal?.length) return l.text.value;
   const value = l.text.value,
     local = localLayerTime(s, l, t),

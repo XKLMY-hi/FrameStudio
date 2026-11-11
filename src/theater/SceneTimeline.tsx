@@ -37,6 +37,7 @@ import {
 } from "./properties";
 type Props = {
   visible?: boolean;
+  parameterOnly?: boolean;
   scene: Scene;
   selectedLayerId: string;
   selectedBinding: Binding;
@@ -69,7 +70,8 @@ type Props = {
   onDelete: (ripple?: boolean) => void;
   onMarker: () => void;
   onCurve: (binding?: Binding) => void;
-  curveOpen: boolean;
+  autoKey: boolean;
+  onToggleAutoKey: () => void;
 };
 
 export function formatTimecode(frame: number, fps: number) {
@@ -404,7 +406,8 @@ function Timeline(p: Props) {
             q.name.toLowerCase().includes(filter.toLowerCase()) ||
             q.channel.toLowerCase().includes(filter.toLowerCase())),
       ),
-      id = owner + ":" + group + ":" + (items[0]?.clipId || "");
+      id = owner + ":" + group + ":" + (items[0]?.clipId || ""),
+      open = isOpen(id, !!p.parameterOnly);
     if (!all.length) return null;
     return (
       <React.Fragment key={id}>
@@ -415,9 +418,9 @@ function Timeline(p: Props) {
           >
             <button
               aria-label={`展开 ${owner} ${group}`}
-              onClick={() => toggle(id)}
+              onClick={() => toggle(id, !!p.parameterOnly)}
             >
-              {isOpen(id) ? "▾" : "▸"}
+              {open ? "▾" : "▸"}
             </button>
             <span>{group}</span>
             <small>
@@ -427,7 +430,7 @@ function Timeline(p: Props) {
           </div>
           {lane(null)}
         </div>
-        {isOpen(id) &&
+        {open &&
           (!filtered.length ? (
             <div className="ae-row ae-property">
               <div className="scene-track-label ae-hint">
@@ -717,7 +720,8 @@ function Timeline(p: Props) {
       if (children) objectRows(l.id, depth + 1);
     }
   }
-  objectRows(null);
+  if (p.parameterOnly) rows.push(propertyRows(p.selectedLayerId, "模型参数", 0));
+  else objectRows(null);
 
   return (
     <section
@@ -817,6 +821,7 @@ function Timeline(p: Props) {
           </label>
         </div>
         <div>
+          {!p.parameterOnly && <>
           <button title="分割（S）" onClick={p.onSplit}>
             <Scissors size={15} />
           </button>
@@ -832,6 +837,7 @@ function Timeline(p: Props) {
           <button title="标记（M）" onClick={p.onMarker}>
             <Flag size={15} />
           </button>
+          </>}
           <button
             title="帧与边缘吸附"
             className={p.snap ? "active" : ""}
@@ -839,9 +845,12 @@ function Timeline(p: Props) {
           >
             <Magnet size={15} />
           </button>
+          <label className="timeline-auto-key" title="调节参数时在播放头记录关键帧">
+            <input type="checkbox" checked={p.autoKey} onChange={p.onToggleAutoKey}/> 自动关键帧
+          </label>
           <div className="timeline-mode" aria-label="底部工作区">
             <span>时间线</span>
-            <button aria-label="关键帧" onClick={() => p.onCurve()}>曲线</button>
+            <button onClick={() => p.onCurve()}>曲线</button>
           </div>
           <input
             aria-label="时间线缩放"
@@ -856,8 +865,8 @@ function Timeline(p: Props) {
       </div>
       <div className="ae-toolbar">
         <input
-          aria-label="搜索时间线对象或属性"
-          placeholder="搜索对象 / 参数"
+          aria-label={p.parameterOnly ? "搜索动作参数" : "搜索时间线对象或属性"}
+          placeholder={p.parameterOnly ? "搜索动作参数" : "搜索对象 / 参数"}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
@@ -869,13 +878,13 @@ function Timeline(p: Props) {
           />
           仅动画属性
         </label>
-        <span>Alt＋滚轮缩放 · 动作拖入指定对象 · 关键帧右键删除</span>
+        <span>{p.parameterOnly ? "Alt＋滚轮缩放 · 双击关键帧打开曲线" : "Alt＋滚轮缩放 · 动作拖入指定对象 · 关键帧右键删除"}</span>
       </div>
       <div className="scene-timeline-scroll" ref={scroller}>
         <div className="scene-timeline-body" style={{ width: width + label }}>
           <div className="scene-ruler-row">
             <div className="scene-track-label ruler-label">
-              对象 / 属性 · {p.scene.fps} FPS
+              {p.parameterOnly ? "模型参数" : "对象 / 属性"} · {p.scene.fps} FPS
             </div>
             <div className="scene-ruler" style={{ width }} onPointerDown={seek}>
               {Array.from(
@@ -909,6 +918,7 @@ function Timeline(p: Props) {
               ))}
             </div>
           </div>
+          {!p.parameterOnly && <>
           <div className="ae-row ae-object">
             <div className="scene-track-label">
               <button aria-label="展开相机" onClick={() => toggle("@camera")}>
@@ -924,6 +934,7 @@ function Timeline(p: Props) {
             {lane(null)}
           </div>
           {isOpen("@camera") && propertyRows("@camera", "相机", 1)}
+          </>}
           {rows}
           <div
             className="scene-playhead"
@@ -940,10 +951,10 @@ function Timeline(p: Props) {
       </div>
       <div className="scene-timeline-footer">
         <span>
-          拖动 / 裁切 · Shift 多选 · S 分割 · Shift+Delete 波纹删除 · M 标记
+          {p.parameterOnly ? "拖动关键帧改时间 · 双击查看曲线 · 右键删除关键帧" : "拖动 / 裁切 · Shift 多选 · S 分割 · Shift+Delete 波纹删除 · M 标记"}
         </span>
         <span>
-          {p.scene.tracks.reduce((n, t) => n + t.clips.length, 0)} 个片段
+          {p.parameterOnly ? "Live2D 动作参数" : p.scene.tracks.reduce((n, t) => n + t.clips.length, 0)+" 个片段"}
         </span>
       </div>
     </section>

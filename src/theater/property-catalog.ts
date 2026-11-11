@@ -64,6 +64,7 @@ const group = (
 export function buildPropertyCatalog(
   s: Scene,
   paramsByLayer: Record<string, Param[]>,
+  parameterOnly = false,
 ) {
   const properties = new Map<string, Property>(),
     parents = new Map<string, string>();
@@ -76,7 +77,7 @@ export function buildPropertyCatalog(
   const object = (l: Layer): PropertyNode => {
     seen.add(l.id);
     const params = paramsByLayer[l.id] || [];
-    const specs = propertiesOf(s, l.id, params);
+    const specs = propertiesOf(s, l.id, params).filter(p=>!parameterOnly || p.channel.startsWith("param:"));
     const actions = clipsOf(s, l.id).filter(
       (c) => c.kind === "motion" || c.kind === "audio",
     );
@@ -128,7 +129,7 @@ export function buildPropertyCatalog(
       locked: l.locked,
     };
   };
-  const roots: PropertyNode[] = [
+  const roots: PropertyNode[] = parameterOnly ? [] : [
     {
       id: "object:@camera",
       label: "相机",

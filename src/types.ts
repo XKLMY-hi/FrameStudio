@@ -22,6 +22,7 @@ export type Asset = {
   fps: number;
   curves: Curve[];
   source?: string;
+  motionFile?:string;
   expression?: { id: string; value: number; blend: string }[];
   audioPath?: string;
   waveform?: number[];

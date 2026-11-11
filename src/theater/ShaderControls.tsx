@@ -32,7 +32,7 @@ export function ShaderControls({ effects, onRecipe, amount, onAmount, onKey, key
           {selected === "imported" && <option value="imported">{recipe?.name}（自定义）</option>}
         </select>
       </label>
-      {recipe && (
+      {(recipe || effects.graph) && (
         <>
           <div className="shader-amount">
             <label>
@@ -43,7 +43,7 @@ export function ShaderControls({ effects, onRecipe, amount, onAmount, onKey, key
             <button className={keyed ? "active" : ""} title="记录风格强度关键帧" onClick={onKey}><Diamond size={14} /></button>
           </div>
           <p className="property-note">
-            {Array.isArray(recipe.passes) && recipe.passes.map(p => shaderOperations[p.op]).filter(Boolean).join(" → ")}
+            {effects.graph ? effects.graph.name : recipe?.passes.map(p => shaderOperations[p.op]).filter(Boolean).join(" → ")}
           </p>
         </>
       )}

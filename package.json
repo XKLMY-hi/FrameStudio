@@ -1,6 +1,6 @@
 {
   "name": "live2d-pocket-studio",
-  "version": "2.8.0",
+  "version": "2.16.0-preview.3",
   "license": "MIT",
   "private": true,
   "type": "module",

@@ -16,6 +16,7 @@ await fs.copyFile(path.join(root,'THIRD-PARTY-NOTICES.md'),path.join(dest,'ç¬¬ä¸
 await fs.copyFile(path.join(root,'SHADERS.md'),path.join(dest,'SHADERS.md'));
 await fs.mkdir(path.join(dest,'examples'),{recursive:true});
 await fs.copyFile(path.join(root,'examples/iris-film.fshader.json'),path.join(dest,'examples/iris-film.fshader.json'));
+await fs.copyFile(path.join(root,'examples/stage-bloom.fsglsl.json'),path.join(dest,'examples/stage-bloom.fsglsl.json'));
 await fs.cp(path.join(root,'docs/brand'),path.join(dest,'docs/brand'),{recursive:true});
 const license=spawnSync(path.join(root,'tools/ffmpeg.exe'),['-L'],{encoding:'utf8',windowsHide:true});await fs.writeFile(path.join(dest,'FFmpeg-LICENSE.txt'),license.stdout+license.stderr);
 console.log(dest);
